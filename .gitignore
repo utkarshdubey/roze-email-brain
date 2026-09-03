@@ -1,0 +1,14 @@
+.env
+.token.json
+/brain*/
+.DS_Store
+*.zip
+.staging-*
+.rollback-*
+node_modules/
+dist/
+examples/
+bench/results/
+bench/*.local.json
+bench/enron-data/
+concepts-preview/
