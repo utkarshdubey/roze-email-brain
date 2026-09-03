@@ -69,9 +69,11 @@ test("messages prefer plain text, preserve sender-local dates, and cap Unicode b
 
 test("client pages ids and parses full threads and metadata", async () => {
   const urls: URL[] = [];
+  let now = 1_000;
   const fetcher: FetchLike = async (input) => {
     const url = new URL(String(input));
     urls.push(url);
+    now += 5;
     if (url.pathname.endsWith("/threads"))
       return Response.json(
         url.searchParams.has("pageToken")
@@ -81,9 +83,22 @@ test("client pages ids and parses full threads and metadata", async () => {
     if (url.pathname.endsWith("/threads/thread-1"))
       return Response.json({ messages: [rawMessage("new", "2000"), rawMessage("old", "1000")] });
     if (url.pathname.endsWith("/messages/m1")) return Response.json(rawMessage());
+    if (url.pathname.endsWith("/profile"))
+      return Response.json({ emailAddress: "me@example.com", historyId: "1" });
     throw new Error(`unexpected ${url}`);
   };
-  const client = new GmailClient(credentials, { fetch: fetcher, sleep: async () => undefined });
+  const client = new GmailClient(credentials, { fetch: fetcher, sleep: async () => undefined, now: () => now });
+  assert.deepEqual(client.getUsage(), {
+    requests: 0,
+    quotaUnits: 0,
+    byResource: {
+      profile: { requests: 0, quotaUnits: 0 },
+      lists: { requests: 0, quotaUnits: 0 },
+      messages: { requests: 0, quotaUnits: 0 },
+      threads: { requests: 0, quotaUnits: 0 },
+    },
+    elapsedMs: 0,
+  });
   assert.deepEqual(await client.listThreadIds("in:sent"), ["t1", "t2", "t3"]);
   assert.deepEqual(
     (await client.fetchThread("thread-1")).messages.map((row) => row.id),
@@ -91,6 +106,20 @@ test("client pages ids and parses full threads and metadata", async () => {
   );
   assert.equal((await client.fetchMessageHeaders("m1")).fromEmail, "jane@example.com");
   assert.equal(urls[1]?.searchParams.get("pageToken"), "next");
+  const beforeProfile = client.getUsage();
+  await client.getProfile();
+  assert.equal(beforeProfile.requests, 4, "a returned snapshot is detached from later requests");
+  assert.deepEqual(client.getUsage(), {
+    requests: 5,
+    quotaUnits: 26,
+    byResource: {
+      profile: { requests: 1, quotaUnits: 1 },
+      lists: { requests: 2, quotaUnits: 10 },
+      messages: { requests: 1, quotaUnits: 5 },
+      threads: { requests: 1, quotaUnits: 10 },
+    },
+    elapsedMs: 25,
+  });
 });
 
 test("a 401 mid-build renews the token once through the source and repeats the request", async () => {
@@ -116,10 +145,12 @@ test("a 401 mid-build renews the token once through the source and repeats the r
     });
     assert.equal((await client.getProfile()).emailAddress, "me@example.com");
     assert.deepEqual(bearers, ["Bearer token", "Bearer fresh-1"], "the stale token is spent once, then renewed");
+    assert.equal(client.getUsage().byResource.profile.requests, 2, "both outbound Gmail attempts are counted");
     assert.match(readFileSync(path, "utf8"), /"token": "fresh-1"/u, "the renewed token is saved for the next command");
     // Sixteen workers crossing the boundary together buy one renewal, and a renewed token is spent as-is.
     await Promise.all([client.getProfile(), client.getProfile(), client.getProfile()]);
     assert.equal(refreshes, 1);
+    assert.equal(client.getUsage().requests, 5, "the OAuth token request is not a Gmail API request");
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -173,10 +204,43 @@ test("quota 403 is retried with seconds of backoff and every request is throttle
     "quota backoff pauses the client until the minute window resets",
   );
   await Promise.all([client.getProfile(), client.getProfile()]);
+  assert.deepEqual(
+    { requests: client.getUsage().requests, quotaUnits: client.getUsage().quotaUnits },
+    { requests: 4, quotaUnits: 4 },
+    "the retried quota answer and the three successful attempts all spend profile units",
+  );
   assert.ok(
     delays.some((ms) => ms > 0 && ms < 5_000),
     "request spacing",
   );
+});
+
+test("usage counts a transport failure when fetch was invoked", async () => {
+  let attempts = 0;
+  let now = 100;
+  const client = new GmailClient("token", {
+    now: () => now,
+    sleep: async () => undefined,
+    fetch: async () => {
+      attempts += 1;
+      now += 4;
+      if (attempts === 1) throw new Error("socket closed");
+      return Response.json({ emailAddress: "me@example.com", historyId: "1" });
+    },
+  });
+  assert.equal(client.getUsage().elapsedMs, 0);
+  assert.equal((await client.getProfile()).emailAddress, "me@example.com");
+  assert.deepEqual(client.getUsage(), {
+    requests: 2,
+    quotaUnits: 2,
+    byResource: {
+      profile: { requests: 2, quotaUnits: 2 },
+      lists: { requests: 0, quotaUnits: 0 },
+      messages: { requests: 0, quotaUnits: 0 },
+      threads: { requests: 0, quotaUnits: 0 },
+    },
+    elapsedMs: 8,
+  });
 });
 
 test("limited concurrency preserves order and finishes siblings before throwing", async () => {

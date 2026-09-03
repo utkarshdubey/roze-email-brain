@@ -1,5 +1,5 @@
-// A read-only Gmail client that paces itself under the per-user quota, retries what a repeat can fix, and
-// returns EmailThread / MessageHeader values. Nothing above it ever sees a raw Gmail resource.
+// A read-only Gmail client that paces itself under the per-user quota, retries what a repeat can fix, meters
+// every outbound attempt by resource kind, and returns domain values. Nothing above it sees a raw resource.
 
 import { z } from "zod";
 import { cleanSnippet } from "../shared/text.js";
@@ -22,7 +22,7 @@ const QUOTA_COOLDOWN_MS = 61_000;
 const QUOTA_UNITS_PER_SECOND = 250;
 const QUOTA_HEADROOM = 0.85;
 const MS_PER_UNIT = 1_000 / (QUOTA_UNITS_PER_SECOND * QUOTA_HEADROOM);
-const UNITS = { profile: 1, list: 5, message: 5, thread: 10 } as const;
+const UNITS = { profile: 1, lists: 5, messages: 5, threads: 10 } as const;
 
 const profileSchema = z.object({
   emailAddress: z.string(),
@@ -42,6 +42,18 @@ export interface ListedMessage {
 }
 const threadSchema = z.object({ messages: z.array(gmailMessageSchema).default([]) });
 export type GmailProfile = z.output<typeof profileSchema>;
+export type GmailResourceKind = keyof typeof UNITS;
+export interface GmailResourceUsage {
+  readonly requests: number;
+  readonly quotaUnits: number;
+}
+export interface GmailUsageSnapshot {
+  readonly requests: number;
+  readonly quotaUnits: number;
+  readonly byResource: Readonly<Record<GmailResourceKind, GmailResourceUsage>>;
+  /** Wall span from the first outbound attempt through the latest completion; zero before the first attempt. */
+  readonly elapsedMs: number;
+}
 
 export class GmailRequestError extends Error {
   override readonly name = "GmailRequestError";
@@ -68,6 +80,7 @@ export function isExhaustedQuota(error: unknown): boolean {
 interface GmailClientOptions {
   fetch?: FetchLike;
   sleep?: (milliseconds: number) => Promise<void>;
+  now?: () => number;
 }
 
 const wait = (milliseconds: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -85,6 +98,16 @@ export class GmailClient {
   readonly #tokens: AccessTokenSource;
   readonly #fetch: FetchLike;
   readonly #sleep: (milliseconds: number) => Promise<void>;
+  readonly #now: () => number;
+  readonly #usage: Record<GmailResourceKind, { requests: number; quotaUnits: number }> = {
+    profile: { requests: 0, quotaUnits: 0 },
+    lists: { requests: 0, quotaUnits: 0 },
+    messages: { requests: 0, quotaUnits: 0 },
+    threads: { requests: 0, quotaUnits: 0 },
+  };
+  #firstRequestAt: number | undefined;
+  #lastRequestCompletedAt: number | undefined;
+  #activeRequests = 0;
   /** Earliest the next request may leave, advanced by each request's own quota cost. */
   #nextRequestAt = 0;
   /** Set by a quota answer; every worker on this client holds off until the window has reset. */
@@ -103,6 +126,41 @@ export class GmailClient {
     }
     this.#fetch = options.fetch ?? globalThis.fetch;
     this.#sleep = options.sleep ?? wait;
+    this.#now = options.now ?? Date.now;
+  }
+
+  /** Attempts are counted when fetch is invoked, including transport failures and every HTTP retry. */
+  #startRequest(resource: GmailResourceKind): void {
+    const startedAt = this.#now();
+    this.#firstRequestAt ??= startedAt;
+    this.#activeRequests += 1;
+    this.#usage[resource].requests += 1;
+    this.#usage[resource].quotaUnits += UNITS[resource];
+  }
+
+  #completeRequest(): void {
+    const completedAt = this.#now();
+    this.#activeRequests -= 1;
+    this.#lastRequestCompletedAt = Math.max(this.#lastRequestCompletedAt ?? completedAt, completedAt);
+  }
+
+  /** A detached snapshot cannot mutate this client's counters. */
+  getUsage(): GmailUsageSnapshot {
+    const byResource = {
+      profile: { ...this.#usage.profile },
+      lists: { ...this.#usage.lists },
+      messages: { ...this.#usage.messages },
+      threads: { ...this.#usage.threads },
+    };
+    const resources = Object.values(byResource);
+    const endedAt = this.#activeRequests > 0 ? this.#now() : this.#lastRequestCompletedAt;
+    const elapsedMs = this.#firstRequestAt === undefined || endedAt === undefined ? 0 : endedAt - this.#firstRequestAt;
+    return {
+      requests: resources.reduce((sum, usage) => sum + usage.requests, 0),
+      quotaUnits: resources.reduce((sum, usage) => sum + usage.quotaUnits, 0),
+      byResource,
+      elapsedMs: Math.max(0, elapsedMs),
+    };
   }
 
   async #takeRequestSlot(units: number): Promise<void> {
@@ -122,7 +180,7 @@ export class GmailClient {
     await this.#sleep(this.#pausedUntil - Date.now());
   }
 
-  async #request(path: string, units: number, parameters?: URLSearchParams): Promise<Response> {
+  async #request(path: string, resource: GmailResourceKind, parameters?: URLSearchParams): Promise<Response> {
     const url = new URL(`${API}/${path.replace(/^\/+/, "")}`);
     if (parameters) {
       url.search = parameters.toString();
@@ -134,8 +192,13 @@ export class GmailClient {
       const token = await this.#tokens.token();
       let response: Response;
       try {
-        await this.#takeRequestSlot(units);
-        response = await this.#fetch(url, { headers: { authorization: `Bearer ${token}` } });
+        await this.#takeRequestSlot(UNITS[resource]);
+        this.#startRequest(resource);
+        try {
+          response = await this.#fetch(url, { headers: { authorization: `Bearer ${token}` } });
+        } finally {
+          this.#completeRequest();
+        }
       } catch (error) {
         // A transport failure carries no status, so it spends the shorter network budget.
         if (attempt + 1 >= ATTEMPTS)
@@ -166,11 +229,11 @@ export class GmailClient {
 
   async #read<Output>(
     path: string,
-    units: number,
+    resource: GmailResourceKind,
     schema: z.ZodType<Output>,
     parameters?: URLSearchParams,
   ): Promise<Output> {
-    const response = await this.#request(path, units, parameters);
+    const response = await this.#request(path, resource, parameters);
     try {
       return schema.parse(await response.json());
     } catch (error) {
@@ -179,7 +242,7 @@ export class GmailClient {
   }
 
   getProfile(): Promise<GmailProfile> {
-    return this.#read("profile", UNITS.profile, profileSchema);
+    return this.#read("profile", "profile", profileSchema);
   }
 
   /** A repeated pageToken would loop forever, so it is refused. */
@@ -194,7 +257,7 @@ export class GmailClient {
       if (token) {
         parameters.set("pageToken", token);
       }
-      const page = await this.#read(resource, UNITS.list, pageSchema, parameters);
+      const page = await this.#read(resource, "lists", pageSchema, parameters);
       const listed: ListedMessage[] =
         resource === "threads"
           ? (page.threads ?? []).map((row) => ({ id: row.id, threadId: row.id }))
@@ -230,7 +293,7 @@ export class GmailClient {
     const message = parseMessage(
       await this.#read(
         `messages/${encodeURIComponent(messageId)}`,
-        UNITS.message,
+        "messages",
         gmailMessageSchema,
         new URLSearchParams({ format: "full" }),
       ),
@@ -242,7 +305,7 @@ export class GmailClient {
     if (!id) throw new Error("Gmail thread id must not be empty");
     const document = await this.#read(
       `threads/${encodeURIComponent(id)}`,
-      UNITS.thread,
+      "threads",
       threadSchema,
       new URLSearchParams({ format: "full" }),
     );
@@ -260,7 +323,7 @@ export class GmailClient {
       parameters.append("metadataHeaders", header);
     }
     const message = parseMessage(
-      await this.#read(`messages/${encodeURIComponent(id)}`, UNITS.message, gmailMessageSchema, parameters),
+      await this.#read(`messages/${encodeURIComponent(id)}`, "messages", gmailMessageSchema, parameters),
       false,
     );
     return {
