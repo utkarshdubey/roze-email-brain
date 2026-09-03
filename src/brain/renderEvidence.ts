@@ -1,9 +1,10 @@
 // Raw threads, the per-year lists that point at them, and the transaction table. The only authoritative
 // layer — every other view cites into it — so these shapes are byte-stable and validated literally.
 import { join } from "node:path";
+import { DEFAULT_RECENT_MONTHS, describeRecentWindow } from "../ingest/mail.js";
+import { parseTransaction, type Transaction } from "../memory/transactions.js";
 import { ensureDirectory, pushToYear, writeFileAtomically, writeYearFiles } from "../shared/atomicFiles.js";
 import { cleanSnippet, sliceCharacters } from "../shared/text.js";
-import { parseTransaction, type Transaction } from "../memory/transactions.js";
 import {
   collapseHeadersToThreads,
   looksLikeAHuman,
@@ -98,11 +99,14 @@ function writeEvidenceIndex(
   evidenceDir: string,
   full: ReadonlyMap<string, string[]>,
   inbox: ReadonlyMap<string, string[]>,
+  recentMonths: number,
 ): void {
   const threadYears = [...full.keys()].sort();
   const inboxYears = [...inbox.keys()].sort();
   const lines = [
-    "# Evidence index",
+    recentMonths === DEFAULT_RECENT_MONTHS
+      ? "# Evidence index"
+      : `# Evidence index (skim window: ${describeRecentWindow(recentMonths)})`,
     "",
     "Full-read threads (both sides, in `threads/<id>.md`):",
     ...[...threadYears].reverse().map((year) => `- threads-${year}.md — ${full.get(year)?.length ?? 0} threads`),
@@ -123,6 +127,7 @@ export function writeEvidenceFiles(
   userEmail: string,
   root: string,
   bodyThreads: readonly EmailThread[] = [],
+  recentMonths = DEFAULT_RECENT_MONTHS,
 ): EvidenceCounts {
   const paths = resolveBrainPaths(root);
   ensureDirectory(paths.evidenceDir);
@@ -162,14 +167,16 @@ export function writeEvidenceFiles(
     paths.evidenceDir,
     "inbox",
     (year) =>
-      `# Skim-tier inbox threads, ${year}: not extracted; rows marked body have their raw messages in ` +
+      `# Skim-tier inbox threads, ${year}${
+        recentMonths === DEFAULT_RECENT_MONTHS ? "" : ` (${describeRecentWindow(recentMonths)})`
+      }: not extracted; rows marked body have their raw messages in ` +
       "evidence/threads/<id>.md, rows marked header need read_email <id> " +
       "(id | day | from | person or auto sender | msgs | subject | body preview | body or header)",
     inboxByYear,
   );
 
   const transactions = writeTransactionFiles([...renderedThreads, ...bodies], paths.evidenceDir);
-  writeEvidenceIndex(paths.evidenceDir, byYear, inboxByYear);
+  writeEvidenceIndex(paths.evidenceDir, byYear, inboxByYear, recentMonths);
   return {
     threads: renderedThreads.length,
     messages: renderedThreads.reduce((total, thread) => total + thread.messages.length, 0),

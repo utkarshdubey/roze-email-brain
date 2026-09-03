@@ -16,8 +16,9 @@ and a plain-file output.
 
 ## Generation
 
-`src/commands/generate.ts` owns the flags and the injectable seams; `src/generation/buildBrain.ts` is
-the orchestration root, and `src/generation/phases.ts` owns the phase plan and the mid-build status.
+`src/commands/generate.ts` owns the flags, usage summaries, and injectable seams;
+`src/generation/buildBrain.ts` is the orchestration root, and `src/generation/phases.ts` owns the phase
+plan and the mid-build status.
 Every generation stage receives its data and a `PipelineContext` containing resolved paths, today's
 day, progress logging, and the model function.
 
@@ -38,22 +39,25 @@ The command publishes these phases in order:
 
 1. `full-read`: every sent, starred, or previously fetched-on-demand thread is fetched in full and
    extracted. The fast inbox header request overlaps this model-bound extraction.
-2. `fast-inbox`: a newest-first two-year header sample excludes obvious automated senders and learns
-   consistently automated bulk domains. A model chooses useful senders to promote.
-3. `complete-inbox`: every eligible inbox thread is indexed, including automated senders; newly
+2. `fast-inbox`: a newest-first recent-window header sample (24 months by default) excludes obvious
+   automated senders and learns consistently automated bulk domains. A model chooses useful senders to promote.
+3. `complete-inbox`: every eligible thread in that window is indexed, including automated senders; newly
    promoted threads are fetched and extracted. The backfill lists the window's messages once (which
    says how many each thread has) and reads each thread the fast pass never covered: a single-message
    thread as one message (5 quota units), a longer one in full (10), never a metadata header first,
    so the body phase finds it already cached and no skim thread is ever fetched twice. Its index row
    is derived from the thread's first message, in the same fields a metadata read would have produced.
 4. `body-evidence`: raw bodies for every remaining indexed thread are fetched and stored, but never
-   extracted. This costs Gmail time, not model tokens.
+   extracted. Sender engagement orders uncached ids before recency and id, so a stopped build caches useful
+   mail first. This costs Gmail time, not model tokens.
 5. `concepts`: cards, tags, clusters, judge, and the first gates run while phase 4 downloads bodies;
    the whole-list review, its gates, and the related-thread search run once both finish, because
    receipts found in body-only mail feed the recurring-interest review.
 
-Every enabled phase renders a complete brain. `--publish-once` skips only the intermediate swaps,
-not the work or order. `--no-skim` removes phases 2–4; `--no-synthesize` removes phase 5;
+Every enabled phase renders a complete brain. `--recent <months>` changes only the skim tiers; participated,
+starred, and on-demand mail stay all-time, while metadata and index headings record the boundary.
+`--publish-once` skips only the intermediate swaps, not the work or order. `--no-skim` removes phases 2–4;
+`--no-synthesize` removes phase 5;
 `--no-promote` keeps the inbox index and bodies but skips sender judgment and extraction.
 
 `src/brain/storage.ts` owns published/cache paths, retrieval scopes, and publication. It stages
@@ -62,12 +66,13 @@ outside the swap. Rename retries exist because Windows scanners and sync clients
 
 ## Ingestion and memory
 
-`src/ingest/mail.ts` owns selection, resumable fetches, and deterministic ordering over the account
-cache in `ingest/cache.ts`; `ingest/promote.ts` owns sender promotion. Promotion groups headers by
-sender; its strict response chooses `all`, `recent`, `latest`, or `ignore`. Local limits cap those
-choices at 25, 5 within 180 days, and 1, and automated senders cannot receive `all`. The Gmail client
-paces requests below the per-user quota and retries bounded network, 429, 5xx, and quota-related 403
-failures.
+`src/ingest/mail.ts` owns selection, recent-window queries, resumable fetches, and deterministic ordering
+over the account cache in `ingest/cache.ts`; `ingest/engagement.ts` reduces Gmail labels and participation
+to a per-sender score. `ingest/promote.ts` owns sender promotion. Promotion groups headers by sender and
+includes opened, replied, important, and starred counts; its strict response chooses `all`, `recent`,
+`latest`, or `ignore`. Local limits cap those choices at 25, 5 within 180 days, and 1, and automated senders
+cannot receive `all`. The Gmail client paces requests below the per-user quota, retries bounded network,
+429, 5xx, and quota-related 403 failures, and counts each outbound attempt and its quota units by resource.
 
 `src/memory/extractThread.ts` makes one structured extraction per full-read thread. Participated
 threads can yield eight items; inbox-only promoted threads expose 1,500 body characters and can
@@ -156,6 +161,9 @@ never land inside a row. A render that faults never throws: rich rendering is dr
 the run degrades to plain lines. `createPipelineLog` still gives a stage that reappears with a new
 total a fresh row, so a later phase never inherits an earlier phase's geometry.
 
+At the end of `generate`, the model ledger is followed by one Gmail line with total quota units, request
+count, thread/message/list attempts, and the elapsed Gmail span. Retries count because Gmail received them.
+
 ## Model, cache, and cost boundary
 
 Stage files own their prompt, strict Zod schema, request construction, and result mapping.
@@ -180,22 +188,27 @@ synthesis, the command compares a cache-aware estimate with remaining `--budget`
 is cached before actual spend is checked, so a stopped build can reuse it and the published brain is
 unchanged.
 
+The promotion prompt's sender line is separately versioned in `promotion.json`. Version 2 adds the user's
+engagement counts; older cumulative decisions remain readable and warn until the file is moved aside, because
+relabeling them would falsely claim they were made from the new paid input.
+
 ## File map
 
 ```text
 src/cli.ts                        argv dispatch, umask, error rendering
 src/commands/auth.ts              `roze auth`: OAuth and profile verification
-src/commands/generate.ts          `roze generate`: flags, context, injectable seams
+src/commands/generate.ts          `roze generate`: flags, context, usage summaries, injectable seams
 src/commands/prompt.ts            `roze prompt`: one question, answer, counters
-src/generation/phases.ts          the phase plan and the mid-build "not yet available" status
-src/generation/buildBrain.ts      phase-by-phase build, staged render, metadata
-src/gmail/client.ts               paced, retrying Gmail reads; the ingest-facing entry point
+src/generation/phases.ts          phase plan, recent window, and mid-build "not yet available" status
+src/generation/buildBrain.ts      phased build, engagement ordering, staged render, metadata
+src/gmail/client.ts               paced, retrying, quota-metered Gmail reads; ingest entry point
 src/gmail/auth.ts                 loopback OAuth sign-in, owner-only token file, refresh
 src/gmail/messages.ts             Gmail wire format to EmailMessage: MIME, addresses, sender-local dates
 src/gmail/http.ts                 injectable fetch and one shape for a failed Google answer
-src/ingest/mail.ts                full-read ids, resumable fetch, two-year skim; ingest entry point
+src/ingest/mail.ts                full-read ids, resumable fetch, configurable recent skim; ingest entry point
 src/ingest/cache.ts               cached thread files, header JSONL, on-demand thread ids
-src/ingest/promote.ts             per-sender all/recent/latest/ignore and its decision cache
+src/ingest/engagement.ts          per-sender behavior score and deterministic body order
+src/ingest/promote.ts             engagement-aware all/recent/latest/ignore, versioned decisions
 src/memory/extractThread.ts       per-thread prompt, schema, cache request, mapping
 src/memory/resolveEntities.ts     conservative identity resolution and item filing
 src/memory/openLoops.ts           loop materiality, named-date expiry, current open-loop list
@@ -212,11 +225,11 @@ src/concepts/interestGates.ts     every deterministic interest acceptance rule
 src/concepts/dedupeConcepts.ts    near-duplicate and subsumed-name collapse across clusters
 src/concepts/reviewRequests.ts    review prompts, input tables, payload budget, response schemas
 src/concepts/reviewConcepts.ts    whole-list merge, tracks, demotion, narratives
-src/brain/renderEvidence.ts       raw threads, per-year thread/inbox lists, transaction files
+src/brain/renderEvidence.ts       raw threads, window-labelled thread/inbox lists, transaction files
 src/brain/renderThreadSummaries.ts one summary line per thread, by year, plus open threads
 src/brain/renderEntities.ts       person/organization profiles and the open-loop index
 src/brain/renderConcepts.ts       project and interest files, their indexes, concepts.json
-src/brain/renderRootIndex.ts      INDEX.md: coverage, layout, navigation, citation contract
+src/brain/renderRootIndex.ts      INDEX.md: coverage boundary, layout, navigation, citation contract
 src/brain/storage.ts              paths/scopes, staged swap, Windows retry, rollback
 src/query/answerAgent.ts          bounded loop: budget extension, verification and header rounds
 src/query/answerPrompt.ts         the frozen system prompt and the index bundle
@@ -234,7 +247,7 @@ src/shared/atomicFiles.ts         atomic JSON/text writes and environment loadin
 src/shared/dates.ts               owner-offset timeline and calendar helpers
 src/shared/text.ts                normalization, names, slugs, hashing
 bench/*.ts                        explicit benchmarks and two offline validators
-test/*.test.ts                    65 offline behavior tests with fake HTTP/models
+test/*.test.ts                    79 offline behavior tests with fake HTTP/models
 ```
 
 For the exact published tree, command examples, and verification commands, see [README.md](README.md).

@@ -27,7 +27,10 @@ import {
 import type { PipelineContext } from "../context.js";
 import type { GmailProfile } from "../gmail/client.js";
 import { readCachedHeaderRows } from "../ingest/cache.js";
+import { computeSenderEngagement, orderThreadIdsBySenderEngagement } from "../ingest/engagement.js";
 import {
+  DEFAULT_RECENT_MONTHS,
+  describeRecentWindow,
   fetchRecentInboxHeaders,
   fetchThreadsById,
   listParticipatedThreadIds,
@@ -50,6 +53,8 @@ export interface GenerationMetadata {
   userEmail: string;
   historyId: string;
   generatedAt: string;
+  /** The skim-tier coverage boundary; participated and starred mail remain all-time. */
+  recentMonths: number;
   /** When the user's offset changed, from their sent mail; every day is rendered by it. */
   timezone: OffsetTimeline;
   build: BuildStatus;
@@ -67,6 +72,7 @@ class BrainBuild {
   private readonly plan: Phase[];
   private readonly started = Date.now();
   private readonly userEmail: string;
+  private readonly participatedThreadIds = new Set<string>();
 
   private threads: EmailThread[] = [];
   private skim: MessageHeader[] = [];
@@ -110,8 +116,23 @@ class BrainBuild {
     );
   }
 
+  /** Custom windows must not revive older cached rows; the default keeps its byte-compatible cache behavior. */
+  private readCurrentSkimHeaders(): MessageHeader[] {
+    const headers = readCachedHeaderRows(this.context.paths, (message) => this.context.log(message));
+    if (this.options.recentMonths === DEFAULT_RECENT_MONTHS) return headers;
+    const current = new Set(this.skim.map((row) => row.threadId));
+    return headers.filter((row) => current.has(row.threadId));
+  }
+
   private renderInto(root: string, build: BuildStatus): GenerationMetadata {
-    const evidence = writeEvidenceFiles(this.threads, this.skim, this.userEmail, root, this.bodies);
+    const evidence = writeEvidenceFiles(
+      this.threads,
+      this.skim,
+      this.userEmail,
+      root,
+      this.bodies,
+      this.options.recentMonths,
+    );
     const summaries = writeThreadSummaries(this.extractions, root, this.context.today);
     const entities = writeEntityFiles(this.registry(), root, this.context.today);
     const { projects, interests, rejections, review } = this.concepts;
@@ -127,7 +148,9 @@ class BrainBuild {
         `- projects/INDEX.md — ${projects.length} durable, outcome-oriented efforts across threads.`,
         `- interests/INDEX.md — ${interests.length} recurring interests, pursued vs receipts-only.`,
         `- open_loops/INDEX.md — ${entities.openLoops} unresolved commitments and pending items, newest first.`,
-        "- evidence/inbox-<year>.md — every other inbox thread of the last two years; rows marked body " +
+        `- evidence/inbox-<year>.md — every other inbox thread of the ${
+          describeRecentWindow(this.options.recentMonths)
+        }; rows marked body ` +
           "have raw messages in evidence/threads/<id>.md, rows marked header need read_email.",
       ],
       build.complete
@@ -139,6 +162,7 @@ class BrainBuild {
       userEmail: this.userEmail,
       historyId: this.profile.historyId,
       generatedAt: this.context.today,
+      recentMonths: this.options.recentMonths,
       timezone: this.timezone,
       build,
       counts: {
@@ -159,7 +183,7 @@ class BrainBuild {
 
   /** Each phase renders a complete tree before the atomic swap. */
   private async publishPhase(phase: Phase, summary: string): Promise<void> {
-    const build = buildStatus(this.plan, phase);
+    const build = buildStatus(this.plan, phase, this.options.recentMonths);
     const elapsed = `${Math.round((Date.now() - this.started) / 1_000)}s`;
     if (this.options.publishOnce && !build.complete) {
       this.ui.step(
@@ -183,9 +207,15 @@ class BrainBuild {
   private async promote(): Promise<EmailThread[]> {
     if (this.options.noPromote) return [];
     const { context, options } = this;
-    const headers = readCachedHeaderRows(context.paths, (message) => context.log(message));
-    checkBudgetBeforeStage("promotion", estimatePromotionCost(headers, context), options.budget, context);
-    this.promoted = await decideWhatToReadPerSender(headers, context);
+    const headers = this.readCurrentSkimHeaders();
+    const engagement = computeSenderEngagement(headers, this.participatedThreadIds);
+    checkBudgetBeforeStage(
+      "promotion",
+      estimatePromotionCost(headers, context, engagement),
+      options.budget,
+      context,
+    );
+    this.promoted = await decideWhatToReadPerSender(headers, context, engagement);
     const known = new Set(this.threads.map((thread) => thread.id));
     const wanted = this.promoted.filter((id) => !known.has(id));
     const fetched = await fetchThreadsById(this.client, wanted, context, "promoted");
@@ -202,8 +232,17 @@ class BrainBuild {
     // The fast inbox scan is Gmail-bound and the first extraction is model-bound, so they overlap.
     this.fastHeaders = this.options.noSkim
       ? undefined
-      : settle(fetchRecentInboxHeaders(this.client, this.context, "fast"));
+      : settle(
+          fetchRecentInboxHeaders(
+            this.client,
+            this.context,
+            "fast",
+            undefined,
+            this.options.recentMonths,
+          ),
+        );
     const ids = await listParticipatedThreadIds(this.client, this.context);
+    ids.forEach((id) => this.participatedThreadIds.add(id));
     const fetched = await fetchThreadsById(this.client, ids, this.context, "threads");
     const raw = fetched.filter((thread) => thread.messages.length);
     this.timezone = buildOffsetTimeline(raw, this.userEmail);
@@ -230,8 +269,14 @@ class BrainBuild {
     );
 
     // One message listing serves both the backfill and the body fetch: it says which threads are one message.
-    const listing = await listSkimThreads(this.client);
-    const complete = await fetchRecentInboxHeaders(this.client, this.context, "complete", listing);
+    const listing = await listSkimThreads(this.client, this.options.recentMonths);
+    const complete = await fetchRecentInboxHeaders(
+      this.client,
+      this.context,
+      "complete",
+      listing,
+      this.options.recentMonths,
+    );
     this.skim = complete.map((row) => localizeHeader(row, this.timezone));
     fresh = await this.promote();
     await this.publishPhase(
@@ -241,7 +286,13 @@ class BrainBuild {
 
     // Bodies are Gmail-only; the backfill already cached most of them, so only unread skim threads cost.
     const known = new Set(this.threads.map((thread) => thread.id));
-    this.bodyIds = [...new Set(this.skim.map((row) => row.threadId))].filter((id) => !known.has(id));
+    const headers = this.readCurrentSkimHeaders();
+    const engagement = computeSenderEngagement(headers, this.participatedThreadIds);
+    this.bodyIds = orderThreadIdsBySenderEngagement(
+      this.skim.map((row) => row.threadId).filter((id) => !known.has(id)),
+      headers,
+      engagement,
+    );
     this.bodyTask = settle(
       fetchThreadsById(this.client, this.bodyIds, this.context, "bodies", listing).then((fetched) =>
         fetched.map((thread) => localizeThread(thread, this.timezone)),

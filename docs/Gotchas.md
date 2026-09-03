@@ -36,5 +36,7 @@ tags: [operations]
 - In zsh, `read … path` inside a loop clobbers `PATH`.
 - The mini model at medium reasoning can spend its whole output cap reasoning and return nothing; the
   cached-call layer retries once at low.
+- Promotion decisions are cumulative but their sender-line input is paid and versioned. A format warning
+  means the old decisions remain active; move the named `promotion.json` aside before re-auditing them.
 - `codex exec` here: `--skip-git-repo-check -m <model> --config model_reasoning_effort=<level> --sandbox
   workspace-write -C <dir> "<prompt>" </dev/null` (no `--full-auto`).
