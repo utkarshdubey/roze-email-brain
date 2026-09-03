@@ -1,0 +1,6 @@
+[
+  { "id": "person", "question": "Who is <a person you emailed>, and what was the last thing you discussed?", "expect": { "cite_any_of": ["<thread id from evidence/threads-<year>.md>"] } },
+  { "id": "header-tier", "question": "What did <an automated sender in evidence/inbox-<year>.md> say?", "expect": { "read_email": true } },
+  { "id": "outcome", "question": "Was I offered a job by <company>?", "expect": { "must_not_match": "you (were|have been) offered" } },
+  { "id": "negative", "question": "Did I ever email NASA about a launch?", "expect": { "no_evidence": true } }
+]
