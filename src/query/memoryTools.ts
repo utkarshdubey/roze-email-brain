@@ -9,7 +9,7 @@ import { readCachedThread, rememberOnDemandThreadId, writeCachedThread } from ".
 import { localizeThread } from "../shared/dates.js";
 import type { EmailThread } from "../types.js";
 import { resolveMemoryFile } from "./memoryPaths.js";
-import { searchMemory } from "./memorySearch.js";
+import { searchMemory, type SearchMemoryOptions } from "./memorySearch.js";
 import {
   capMiddle,
   linesOf,
@@ -87,6 +87,7 @@ export async function executeTool(
   value: unknown,
   brainDir: string,
   fetchThread?: FetchThread,
+  searchOptions: SearchMemoryOptions = {},
 ): Promise<string> {
   const args = (typeof value === "object" && value !== null ? value : {}) as Record<string, unknown>;
   try {
@@ -101,6 +102,7 @@ export async function executeTool(
         args.amounts as Amounts,
         args.from as string,
         args.to as string,
+        searchOptions,
       );
     if (name === "read_memory")
       return readMemory(brainDir, String(args.path ?? ""), args.start_line as number, args.max_lines as number);
@@ -110,4 +112,3 @@ export async function executeTool(
     return `error: ${error instanceof Error ? error.message : String(error)}`;
   }
 }
-

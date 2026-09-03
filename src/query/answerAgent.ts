@@ -22,6 +22,7 @@ import {
   type CitationAudit,
 } from "./citations.js";
 import { executeTool, type FetchThread } from "./memoryTools.js";
+import type { SearchMemoryOptions } from "./memorySearch.js";
 import { TOOL_DEFINITIONS } from "./toolContracts.js";
 
 /** Added per extension, while the previous window kept opening new threads or views. */
@@ -203,12 +204,13 @@ async function runRequestedCalls(
   root: string,
   live: FetchThread | undefined,
   trace: Trace,
+  searchOptions: SearchMemoryOptions,
 ): Promise<void> {
   state.input.push(...response.outputItems);
   const allowed = response.functionCalls.slice(0, Math.max(0, state.allowance - state.log.toolCalls.length));
   for (const call of allowed) {
     const args = parseArguments(call.argumentsJson);
-    const output = await executeTool(call.name, args, root, live);
+    const output = await executeTool(call.name, args, root, live, searchOptions);
     noteToolOutput(state.log, call.name, args, output);
     const label = formatTraceLabel(call.name, args);
     state.log.toolCalls.push({ tool: call.name, command: label });
@@ -319,6 +321,9 @@ export async function answerOneQuestion(
   const model = options.model ?? MODELS.answer;
   const live = options.fetchThread;
   const trace = createTrace(options);
+  const searchOptions: SearchMemoryOptions = {
+    onIndexFallback: options.verbose ? trace : undefined,
+  };
   const state = newState(query, cap);
 
   usageLedger.reset();
@@ -341,7 +346,7 @@ export async function answerOneQuestion(
       if (reviewDraft(state, response, root, trace)) break;
       continue;
     }
-    await runRequestedCalls(state, response, root, live, trace);
+    await runRequestedCalls(state, response, root, live, trace, searchOptions);
   }
   return toAnswerResult(state);
 }
