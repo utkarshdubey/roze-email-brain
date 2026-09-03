@@ -29,7 +29,7 @@ cp .env.example .env
 
 Set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `OPENAI_API_KEY`. The Google project must have
 the Gmail API enabled; add the account as a test user when the consent screen is in testing.
-Optional `ROZE_MODEL_*` overrides are documented in `.env.example`.
+Optional `ROZE_MODEL_*` and `ROZE_SEARCH` overrides are documented in `.env.example`.
 
 ## Use
 
@@ -59,11 +59,14 @@ cache-aware expected cost; the budget is enforced both before the stage and afte
 response. Gmail and model results live under `brain/.cache/<account>/`, so unchanged rebuilds make
 no model calls.
 
-`prompt` can only call three tools: literal `search_memory`, allowlisted `read_memory`, and
-read-only `read_email` for an indexed thread whose body is not stored yet. A grounding audit checks
-every answer citation against material opened during that question and a real raw-message day. It
-allows one repair round, then visibly flags anything still unverified. Frequency questions use
-deterministic grouped counts over the yearly indexes rather than a sample of search hits.
+`prompt` can only call three tools: literal-safe, FTS5-ranked `search_memory`, allowlisted
+`read_memory`, and read-only `read_email` for an indexed thread whose body is not stored yet. The
+derived search index lives in the account cache, rebuilds from published Markdown when stale, and
+falls back to the complete literal scanner when `node:sqlite` is unavailable. Set
+`ROZE_SEARCH=literal` to select that reference engine explicitly. A grounding audit checks every
+answer citation against material opened during that question and a real raw-message day. It allows
+one repair round, then visibly flags anything still unverified. Frequency questions always use
+deterministic scanner-backed counts over the yearly indexes rather than a sample of ranked hits.
 
 ### Terminal output
 
@@ -103,7 +106,8 @@ brain/
   evidence/transactions-<year>.md     parsed merchant, kind, amount, and currency rows
   evidence/threads/<id>.md             authoritative raw messages
   meta.json, concepts.json
-  .cache/<account>/                    never queryable
+  .cache/<account>/search.sqlite       derived ranked-search index; never queryable
+  .cache/<account>/...                 Gmail and model caches; never queryable
 ```
 
 Raw messages are oldest first. Their dates use the account owner's historical UTC-offset timeline,
@@ -162,11 +166,12 @@ npm test
 npm run validate
 ```
 
-The 58 tests use injected models and fake HTTP. `validateCitations.ts` checks every generated
-citation; `validateConcepts.ts` replays the production gates from caches and compares a temporary
-render byte-for-byte. Both are offline. `bench/rebuildConcepts.ts` can preview a cache-backed concept
-rebuild. `bench/evalAgent.ts`, `bench/auditPromotion.ts --second-opinion`, and `bench/enronBrain.ts`
-may call external services and are intentionally explicit rather than part of the test suite:
+The 80 tests use injected models, fake HTTP, and synthetic search indexes. `validateCitations.ts`
+checks every generated citation; `validateConcepts.ts` replays the production gates from caches and
+compares a temporary render byte-for-byte. Both are offline. `bench/rebuildConcepts.ts` can preview a
+cache-backed concept rebuild. `bench/evalAgent.ts`, `bench/auditPromotion.ts --second-opinion`, and
+`bench/enronBrain.ts` may call external services and are intentionally explicit rather than part of
+the test suite:
 
 ```bash
 # Which senders the promotion model chose to read, what the guards changed, and (paid, N calls)
@@ -182,4 +187,13 @@ npx tsx bench/enronBrain.ts --maildir maildir/giron-d --questions giron-d.dev.js
   --root brain-enron --out bench/results/enron.giron-d.questions.json --budget 3
 npx tsx bench/evalAgent.ts bench/results/enron.giron-d.questions.json --brain brain-enron --judge \
   --out bench/results/enron.giron-d.eval.json
+```
+
+`bench/retrievalRecall.ts` is the exception: it makes no model or network calls. It runs both scopes
+and both literal-safe match modes against expected thread ids, reporting hit@5/10/20, MRR, and mean
+search time while writing detailed ignored JSON under `bench/results/`:
+
+```bash
+npx tsx bench/retrievalRecall.ts bench/eval.example.json --engine literal --brain brain
+npx tsx bench/retrievalRecall.ts bench/eval.example.json --engine fts --brain brain
 ```

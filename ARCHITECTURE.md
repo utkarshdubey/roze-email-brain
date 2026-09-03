@@ -59,6 +59,8 @@ not the work or order. `--no-skim` removes phases 2–4; `--no-synthesize` remov
 `src/brain/storage.ts` owns published/cache paths, retrieval scopes, and publication. It stages
 targets beside the live tree, renames every target, and rolls back a partial failure; caches remain
 outside the swap. Rename retries exist because Windows scanners and sync clients can hold files open.
+After each successful publication, generation removes the account's derived search index so the next
+query rebuilds it against the new tree.
 
 ## Ingestion and memory
 
@@ -116,11 +118,21 @@ question → search_memory | read_memory | read_email → draft → citation aud
 ```
 
 `src/query/toolContracts.ts` holds the three strict Zod contracts and the output bounds,
-`src/query/memorySearch.ts` the literal search and grouped counting, `src/query/memoryTools.ts` the
-line reads, the live thread read, and dispatch; `src/query/memoryPaths.ts` is the path allowlist and
-`src/query/citations.ts` the grounding audit. Absolute paths, traversal, symlinks, dotfiles, caches,
-JSONL, and non-generated file types are rejected. `read_email` is reserved for indexed header-only
-mail; its handler caches the thread and records it for extraction on the next generate.
+`src/query/searchIndex.ts` the account-scoped FTS5 index and BM25 ranking, and
+`src/query/memorySearch.ts` the engine dispatch, literal reference scanner, and grouped counting.
+`src/query/memoryTools.ts` owns line reads, the live thread read, and dispatch;
+`src/query/memoryPaths.ts` is the path allowlist and `src/query/citations.ts` the grounding audit.
+Absolute paths, traversal, symlinks, dotfiles, caches, JSONL, and non-generated file types are
+rejected. `read_email` is reserved for indexed header-only mail; its handler caches the thread and
+records it for extraction on the next generate.
+
+Ranked searches use one FTS5 row per allowlisted Markdown line with the `porter unicode61` tokenizer.
+The stored file/day/kind/person metadata combines BM25 with the existing phrase, inbox-person, and
+recency bonuses before the existing per-file share and result limit. User fragments are always bound
+as quoted MATCH parameters, and scope predicates come only from `VIEW_GLOBS_BY_SCOPE`. The database
+lives at `.cache/<account>/search.sqlite`; a fingerprint of `meta.json`'s generation day and the
+published file paths, sizes, and mtimes triggers an atomic rebuild. Node versions without `node:sqlite`
+and failed builds fall back to the literal scanner; `ROZE_SEARCH=literal` selects it explicitly.
 
 Grouped search counts each matching thread once across yearly indexes and can group by subject,
 sender, merchant, kind, currency, day, month, or year; transaction totals can also be summed. This is
@@ -221,7 +233,8 @@ src/brain/storage.ts              paths/scopes, staged swap, Windows retry, roll
 src/query/answerAgent.ts          bounded loop: budget extension, verification and header rounds
 src/query/answerPrompt.ts         the frozen system prompt and the index bundle
 src/query/toolContracts.ts        the three tool argument schemas, descriptions, output bounds
-src/query/memorySearch.ts         literal line search and the grouped/summed tally
+src/query/searchIndex.ts          derived FTS5 rows, fingerprint/rebuild, BM25 and stable ranking bonuses
+src/query/memorySearch.ts         FTS/literal dispatch, literal reference scan, grouped/summed tally
 src/query/memoryTools.ts          read_memory, read_email, and tool dispatch
 src/query/memoryPaths.ts          retrieval allowlist, symlink rejection, scope globs
 src/query/citations.ts            grounding audit of every [t:<id> <day>]
@@ -233,8 +246,9 @@ src/types.ts                      shared domain vocabulary
 src/shared/atomicFiles.ts         atomic JSON/text writes and environment loading
 src/shared/dates.ts               owner-offset timeline and calendar helpers
 src/shared/text.ts                normalization, names, slugs, hashing
+bench/retrievalRecall.ts          zero-cost hit@5/10/20, MRR, and latency comparison for literal vs FTS
 bench/*.ts                        explicit benchmarks and two offline validators
-test/*.test.ts                    65 offline behavior tests with fake HTTP/models
+test/*.test.ts                    offline behavior tests with fake HTTP/models and synthetic search indexes
 ```
 
 For the exact published tree, command examples, and verification commands, see [README.md](README.md).

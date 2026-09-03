@@ -15,7 +15,7 @@ brain/
   evidence/inbox-<year>.md        header rows (body|header) for the two-year window
   evidence/transactions-<year>.md typed receipt rows (id | day | merchant | kind | amount | currency | sender | subject)
   meta.json  concepts.json        build metadata; accepted concepts, rejection counters, review log
-  .cache/<account>/               Gmail and model results; never queryable
+  .cache/<account>/               Gmail/model results plus derived search.sqlite; never queryable
 ```
 The rubric directories are derived views; the agent uses them to find thread ids and verifies in
 `evidence/threads/` before answering. See [[Every claim cites a thread and a day]].

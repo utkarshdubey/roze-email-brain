@@ -85,13 +85,23 @@ recurring merchants parsed from raw receipts. Its references are limited to memb
 explicit context, unmentioned concepts survive unchanged, every verdict is logged, and the same
 gates run again.
 
-## Plain files and literal retrieval
+## Plain files and derived ranked retrieval
 
 Markdown makes every layer readable without a service, migration, or special client. Raw thread
-files are authoritative; entity and concept pages are navigation. Literal search is predictable and
-fast enough for a personal mailbox, and grouped search counts full yearly indexes rather than asking
-the model to generalize from a few hits. Typed transaction rows make amount and merchant aggregation
-mechanical.
+files are authoritative; entity and concept pages are navigation. Ranked lookup is derived rather
+than published: an account-scoped FTS5 cache indexes each searchable line with Porter stemming and
+combines BM25 with the existing phrase, inbox-person, and recency preferences. The same scope globs
+remain the sandbox, every MATCH fragment is quoted data, and the existing per-file share is applied
+after ranking. A fingerprint rebuilds stale indexes, while generation removes the cache after each
+publication. The literal scanner stays as the compatibility fallback and the reference selected by
+`ROZE_SEARCH=literal`.
+
+This separation also keeps counting exact. Grouped search still scans complete yearly indexes and
+never samples ranked hits; typed transaction rows make amount and merchant aggregation mechanical.
+On the 30-item development retrieval bench, broad all-scope hit@20 moved from 11/30 literal to 22/30
+FTS, MRR from 0.2043 to 0.4572, and latency from 7,435.03 ms to 624.94 ms. The four-mode overall mean
+fell from 3,073.20 ms to 214.25 ms (14.34×), after a 12.41 s cold build; sealed evaluation is still
+outstanding.
 
 The answer agent receives no shell and no write tool. Its allowlist exposes three operations:
 search generated views, read line ranges from them, and fetch one indexed header-only Gmail thread.
@@ -214,7 +224,8 @@ cost about $0.06; the complete DoorDash tally described above cost about $0.08.
 
 ## Deliberately absent
 
-- Embeddings or a vector database: literal retrieval has lower operational and audit cost here.
+- Embeddings or a vector database: a derived local FTS index adds stemming and ranking while keeping
+  lower operational and audit cost.
 - Model-driven identity merging: the hallucination risk outweighs the convenience.
 - A provider SDK or application framework: global `fetch`, Zod, and small modules cover the boundary.
 - A daemon, web UI, multi-user service, or answer write-back: the product is a one-user CLI and its
@@ -225,5 +236,5 @@ cost about $0.06; the complete DoorDash tally described above cost about $0.08.
   external datasets are explicit under `bench/`.
 
 The remaining quality ceiling is concept synthesis, not storage coverage: related efforts can still
-be split or over-merged, and literal search depends on words present in the stored mail. Any larger
+be split or over-merged, and lexical search depends on words or stems present in the stored mail. Any larger
 design should first demonstrate a grounded improvement in the instrumented benchmark traces.
