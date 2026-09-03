@@ -22,6 +22,8 @@ and [[NOTES]] (decisions and tradeoffs); this vault holds the *why* behind them 
 - [[Open loops have a lifecycle]]
 - [[Four tiers of mail]]
 - [[Cluster first, then gates, then one review]]
+- [[Topics are the third cluster family]]
+- [[Every proposal leaves a trace]]
 - [[Bodies before concepts]]
 - [[Graph database rejected]]
 - [[Typed tools, never a shell]]

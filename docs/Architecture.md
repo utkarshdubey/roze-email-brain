@@ -9,9 +9,10 @@ Two data flows, both ending in files a person can read.
 ## Build (`roze generate`)
 Gmail → threads (participated and starred, all time; promoted senders; raw bodies for the rest of two
 years) → one structured extraction per thread → deterministic entity resolution and open-loop lifecycle →
-body-free cards → life-domain tags → entity and per-year domain clusters → enum-cited cluster judge →
-deterministic gates → whole-list review → gates again → related threads → rendered views, published by a
-staged swap. Details: [[Pipeline phases]], [[Concept layer]], [[Brain layout]].
+body-free cards → life-domain tags → entity, per-year domain, and topic clusters → enum-cited cluster
+judge → deterministic gates → whole-list review → gates again → related threads → rendered views and
+the proposal trace, published by a staged swap. Details: [[Pipeline phases]], [[Concept layer]],
+[[Brain layout]].
 
 ## Answer (`roze prompt`)
 Question → an agent with three typed, non-mutating tools (`search_memory` with tallies, `read_memory`,
@@ -20,6 +21,8 @@ mandatory `[t:<thread> <day>]` citations. Details: [[Query agent]].
 
 ## Boundaries that matter
 - Models propose; code owns provenance, identity, lifecycle, deduplication, cost, and publication.
+- Every project or interest proposal keeps its cluster, citations, named gate outcomes, review verdict,
+  and final file (or drop stage) in `concepts/TRACE.md`.
 - Every stored claim resolves to a raw message in `evidence/threads/<id>.md` with a dated heading.
 - One provider adapter, one cache-and-budget layer ([[Costs and caching]]), zod as the only runtime library
   besides the terminal UI packages.

@@ -61,8 +61,12 @@ plausible continuation is not proof that a commitment closed.
 
 Projects and interests span threads, but a mailbox-wide prompt is too large and encourages unrelated
 efforts to merge. Roze first makes body-free cards, adds a small life-domain taxonomy, and builds
-bounded entity and domain clusters. The judge can cite only exact thread/day pairs supplied in its
-own cluster.
+bounded entity, domain, and topic clusters. Topics normalize only generic function words and combine
+the model's short label with subject vocabulary; Jaccard union recovers recurring efforts that share
+neither one counterparty nor one broad domain. Oversized clusters split by year, preserving older efforts
+without increasing the judge request cap. The judge can cite only exact thread/day pairs supplied in its
+own cluster. Topics hash into a separate eight-bucket namespace, leaving the original 24 entity/domain
+cache inputs stable.
 
 Model output then passes deterministic gates in `src/concepts/applyGates.ts`. The important reasons
 for those checks are:
@@ -84,6 +88,11 @@ demotes non-projects, groups interests, and writes narratives. It may also use c
 recurring merchants parsed from raw receipts. Its references are limited to member evidence and
 explicit context, unmentioned concepts survive unchanged, every verdict is logged, and the same
 gates run again.
+
+Named counters make aggregate failures measurable but used to hide the fate of an individual proposal.
+The proposal trace now records source cluster and citations, both gate/dedupe passes, the review verdict,
+and the final file or drop stage. It is published as Markdown for inspection and as structured JSON for
+tools. This metadata stays outside every model input and does not alter accepted lists or counter values.
 
 ## Plain files and literal retrieval
 

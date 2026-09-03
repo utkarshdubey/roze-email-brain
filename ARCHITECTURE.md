@@ -28,9 +28,9 @@ Gmail
   → extract full-read threads
   ├→ resolve people, organizations, and open loops
   ├→ render raw evidence, transactions, and thread summaries
-  └→ cards → domain tags → clusters → judge → gates
+  └→ cards → domain/topic tags → entity/domain/topic clusters → judge → gates
            → whole-list review (+ loops and recurring merchants) → gates
-           → related-thread search → project and interest files
+           → related-thread search → project, interest, and proposal-trace files
   → render root metadata → stage → atomic swap
 ```
 
@@ -87,11 +87,13 @@ same local day even when the sender used another zone.
 1. `makeThreadCards` in `buildConcepts.ts` projects extractions into bounded, body-free cards.
    Omitting bodies limits both prompt size and prompt-injection exposure.
 2. `tagLifeDomains.ts` assigns up to three closed-taxonomy labels.
-3. `buildClusters.ts` groups recurring entities and life domains locally; oversized
-   domain clusters split by year before judgment.
+3. `buildClusters.ts` groups recurring entities, life domains, and normalized topics locally. Topic groups
+   use subject vocabulary and merge at token-set Jaccard ≥ 0.5. Oversized clusters split by year before
+   judgment; entity clusters at or below their cap retain their old keys.
 4. `judgeClusters.ts` proposes projects and interests. Its schema permits only exact
    `<thread-id>::<message-day>` references present in that request, and code rejects evidence outside
-   the producing cluster.
+   the producing cluster. Entity and domain clusters retain the original 24 hash buckets; topics use a
+   separate eight-bucket namespace so their addition does not invalidate old request bytes.
 5. `applyGates.ts` enforces provenance, recurrence, duration, lifecycle, grounded names, and duplicate
    collapse: the project rules in `projectGates.ts`, the interest rules in `interestGates.ts`, the
    shared grounding index in `evidenceContext.ts`, and cross-cluster collapse in `dedupeConcepts.ts`.
@@ -103,9 +105,12 @@ same local day even when the sender used another zone.
    and named context.
 7. The same gates run again. `buildConcepts.ts` then performs a literal whole-name search over every
    stored thread so concept pages can lead the agent beyond their cited rows.
+8. `conceptTrace.ts` follows every raw proposal through both gate passes, both dedupe passes, and review.
+   `renderConcepts.ts` publishes the structured rows in `concepts.json` and the newest-stage-first
+   `concepts/TRACE.md`, including the final file or exact drop stage.
 
 The review never silently replaces unmentioned concepts. Its merge/demotion log and all gate counts
-are published in `concepts.json`.
+are published in `concepts.json`; trace bookkeeping does not change either accepted lists or counters.
 
 ## Query and grounding
 
@@ -203,19 +208,21 @@ src/memory/transactions.ts        typed receipt rows parsed from automated mail
 src/memory/recurringMerchants.ts  repeat-receipt groups, cited, for interest review
 src/concepts/buildConcepts.ts     cards → stages → both gates → related mail; cost estimate
 src/concepts/tagLifeDomains.ts    closed life-domain taxonomy, tag prompt, cached tag batches
-src/concepts/buildClusters.ts     entity groups and per-year domain clusters, capped for one request
-src/concepts/judgeClusters.ts     judge prompt, enum citations/locality, hash-bucketed batches
+src/concepts/buildClusters.ts     entity/domain/topic groups, capped and split by year when oversized
+src/concepts/topicClusters.ts     topic normalization, subject vocabulary, Jaccard union-find groups
+src/concepts/judgeClusters.ts     judge prompt, enum citations/locality, legacy and topic hash buckets
 src/concepts/applyGates.ts        the gate boundary: parse, gate, collapse, sort, count
 src/concepts/evidenceContext.ts   the evidence index and the grounding checks both gate sets share
 src/concepts/projectGates.ts      every deterministic project acceptance rule
 src/concepts/interestGates.ts     every deterministic interest acceptance rule
 src/concepts/dedupeConcepts.ts    near-duplicate and subsumed-name collapse across clusters
+src/concepts/conceptTrace.ts      proposal lineage through gates, dedupe, review, and final files
 src/concepts/reviewRequests.ts    review prompts, input tables, payload budget, response schemas
 src/concepts/reviewConcepts.ts    whole-list merge, tracks, demotion, narratives
 src/brain/renderEvidence.ts       raw threads, per-year thread/inbox lists, transaction files
 src/brain/renderThreadSummaries.ts one summary line per thread, by year, plus open threads
 src/brain/renderEntities.ts       person/organization profiles and the open-loop index
-src/brain/renderConcepts.ts       project and interest files, their indexes, concepts.json
+src/brain/renderConcepts.ts       project/interest files, proposal trace, indexes, concepts.json
 src/brain/renderRootIndex.ts      INDEX.md: coverage, layout, navigation, citation contract
 src/brain/storage.ts              paths/scopes, staged swap, Windows retry, rollback
 src/query/answerAgent.ts          bounded loop: budget extension, verification and header rounds
@@ -234,7 +241,7 @@ src/shared/atomicFiles.ts         atomic JSON/text writes and environment loadin
 src/shared/dates.ts               owner-offset timeline and calendar helpers
 src/shared/text.ts                normalization, names, slugs, hashing
 bench/*.ts                        explicit benchmarks and two offline validators
-test/*.test.ts                    65 offline behavior tests with fake HTTP/models
+test/*.test.ts                    78 offline behavior tests with fake HTTP/models
 ```
 
 For the exact published tree, command examples, and verification commands, see [README.md](README.md).

@@ -45,8 +45,8 @@ npm run roze -- prompt "What projects am I working on, and where does each stand
 2. a people-first two-year inbox skim, with useful senders promoted to full reads;
 3. the complete two-year inbox index and any additional promoted senders;
 4. raw bodies for the remaining indexed threads, stored as searchable evidence but not extracted;
-5. projects and interests synthesized across threads, gated, reviewed as whole lists, gated again,
-   and linked to related threads.
+5. projects and interests synthesized across entity, domain, and topic clusters; gated, reviewed as whole
+   lists, gated again, linked to related threads, and accompanied by a proposal-fate trace.
 
 `INDEX.md` and `meta.json` identify the current phase. Every publication is staged and swapped as
 one tree; a failed partial swap restores the prior tree. `--publish-once` delays publication until
@@ -95,6 +95,7 @@ brain/
   organizations/INDEX.md, organizations/ALL.md, organizations/<slug>.md
   projects/INDEX.md, projects/<slug>.md
   interests/INDEX.md, interests/<slug>.md
+  concepts/TRACE.md                    proposal lineage through gates, review, and final files
   open_loops/INDEX.md
   threads/INDEX.md, threads/threads-<year>.md
   evidence/INDEX.md
@@ -142,8 +143,8 @@ larger model paid for itself. Mailbox mix, cache state, and overrides change the
 The two flows are:
 
 ```text
-Gmail → selection → extraction → entities/loops → cards → domain tags → clusters → judge → gates
-      → whole-list review → gates → related threads → staged files
+Gmail → selection → extraction → entities/loops → cards → domain/topic tags → three cluster families
+      → judge → gates → whole-list review → gates → related threads + proposal trace → staged files
 
 question → search_memory/read_memory/read_email → citation audit → answer
 ```
@@ -162,7 +163,7 @@ npm test
 npm run validate
 ```
 
-The 58 tests use injected models and fake HTTP. `validateCitations.ts` checks every generated
+The 78 tests use injected models and fake HTTP. `validateCitations.ts` checks every generated
 citation; `validateConcepts.ts` replays the production gates from caches and compares a temporary
 render byte-for-byte. Both are offline. `bench/rebuildConcepts.ts` can preview a cache-backed concept
 rebuild. `bench/evalAgent.ts`, `bench/auditPromotion.ts --second-opinion`, and `bench/enronBrain.ts`
