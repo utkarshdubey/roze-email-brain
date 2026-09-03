@@ -8,8 +8,10 @@ import { cleanText, normalizeNameKey, wordsFromText } from "../shared/text.js";
 import {
   PROJECT_EVIDENCE_ROLES,
   PROJECT_STATUSES,
+  mergeRejections,
   reject,
   type EvidenceRow,
+  type GateRuleResult,
   type Project,
   type ProjectEvidenceRole,
   type ProjectTrack,
@@ -215,52 +217,69 @@ export function keepProjectsThatPass(
   context: EvidenceContext,
   allowed: Record<string, Set<string>>,
   counts: RejectionCounts,
-): Project[] {
+): GateRuleResult<Project> {
   const accepted: Project[] = [];
+  const acceptedProposalIndexes: number[] = [];
+  const outcomes: GateRuleResult<Project>["outcomes"] = [];
   const takenNames = new Set<string>();
-  for (const source of proposals) {
+  for (const [proposalIndex, source] of proposals.entries()) {
+    const proposalCounts: RejectionCounts = {};
+    const finish = (passed: boolean): void => {
+      mergeRejections(counts, proposalCounts);
+      outcomes.push({
+        proposalIndex,
+        name: cleanText(source.name, 160) || "(unnamed project)",
+        passed,
+        counters: proposalCounts,
+      });
+    };
     const checked = keepValidEvidence(source.evidence, allowed, PROJECT_EVIDENCE_ROLES);
-    reject(counts, "project_invalid_evidence", checked.invalid);
+    reject(proposalCounts, "project_invalid_evidence", checked.invalid);
     const evidence = checked.evidence.filter(
       (row) => !PROJECT_STATE_ROLES.has(row.role) || dayCanCarryState(context, row),
     );
-    reject(counts, "project_automated_state_evidence", checked.evidence.length - evidence.length);
+    reject(proposalCounts, "project_automated_state_evidence", checked.evidence.length - evidence.length);
     // One thread is an episode, however many messages it holds; an effort crosses threads.
     if (new Set(evidence.map((row) => row.threadId)).size < 2) {
-      reject(counts, "project_insufficient_threads");
+      reject(proposalCounts, "project_insufficient_threads");
+      finish(false);
       continue;
     }
     const name = cleanText(source.name, 160);
     const goal = cleanText(source.goal, 600);
     if (!name || !goal || takenNames.has(name.toLowerCase())) {
-      reject(counts, "project_duplicate_or_empty");
+      reject(proposalCounts, "project_duplicate_or_empty");
+      finish(false);
       continue;
     }
     takenNames.add(name.toLowerCase());
     // The goal row is what makes a project a project; without one there is nothing to drive toward.
     if (!evidence.some((row) => row.role === "goal")) {
-      reject(counts, "project_ungrounded_goal");
+      reject(proposalCounts, "project_ungrounded_goal");
+      finish(false);
       continue;
     }
     if (LOOP_LIKE.test(name)) {
-      reject(counts, "project_loop_like_name");
+      reject(proposalCounts, "project_loop_like_name");
+      finish(false);
       continue;
     }
     const dates = evidence.map((row) => row.day).sort();
     const drivenByUser = new Set(evidence.map((row) => row.threadId).filter((id) => context.userThreads.has(id)));
     if (countDaysBetween(dates.at(-1)!, dates[0]!) < MINIMUM_SPAN_DAYS && drivenByUser.size < 2) {
-      reject(counts, "project_too_brief");
+      reject(proposalCounts, "project_too_brief");
+      finish(false);
       continue;
     }
-    const state = correctProjectState(source, evidence, context, counts);
-    const parties = keepGroundedParticipants(source, evidence, context, counts);
-    const tracks = keepValidTracks(source, allowed, counts);
+    const state = correctProjectState(source, evidence, context, proposalCounts);
+    const parties = keepGroundedParticipants(source, evidence, context, proposalCounts);
+    const tracks = keepValidTracks(source, allowed, proposalCounts);
     const cited = new Set([...evidence.map((row) => row.threadId), ...tracks.map((row) => row.threadId)]);
     // Last activity prefers the newest day a person wrote: an automated tail keeps nothing alive.
     const humanDates = evidence.filter((row) => dayHasHumanMessage(context, row)).map((row) => row.day);
     accepted.push({
       name,
-      aliases: keepGroundedAliases(source, name, evidence, context, counts),
+      aliases: keepGroundedAliases(source, name, evidence, context, proposalCounts),
       goal,
       status: state.status,
       outcome: state.outcome,
@@ -269,10 +288,17 @@ export function keepProjectsThatPass(
       firstSeen: firstMessageDay(context, evidence),
       lastActivity: (humanDates.length ? humanDates : dates).sort().at(-1)!,
       evidence,
-      narrative: keepGroundedNarrative(source.narrative, evidence, counts, "project_narrative_dates_unsupported"),
+      narrative: keepGroundedNarrative(
+        source.narrative,
+        evidence,
+        proposalCounts,
+        "project_narrative_dates_unsupported",
+      ),
       tracks,
-      related: keepValidRelated(source.related, context, cited, counts, "project_related_invalid"),
+      related: keepValidRelated(source.related, context, cited, proposalCounts, "project_related_invalid"),
     });
+    acceptedProposalIndexes.push(proposalIndex);
+    finish(true);
   }
-  return accepted;
+  return { accepted, acceptedProposalIndexes, outcomes };
 }

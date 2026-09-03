@@ -193,7 +193,7 @@ test("a mid-publish failure restores every old target and removes staging state"
     assert.equal(readFileSync(join(root, "INDEX.md"), "utf8"), "old-index");
     assert.ok(!existsSync(join(root, `.staging-${process.pid}`)));
     assert.ok(!existsSync(join(root, `.rollback-${process.pid}`)));
-    assert.deepEqual(PUBLISH_TARGETS.length, 10);
+    assert.deepEqual(PUBLISH_TARGETS.length, 11);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

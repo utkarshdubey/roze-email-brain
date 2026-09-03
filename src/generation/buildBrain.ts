@@ -114,8 +114,8 @@ class BrainBuild {
     const evidence = writeEvidenceFiles(this.threads, this.skim, this.userEmail, root, this.bodies);
     const summaries = writeThreadSummaries(this.extractions, root, this.context.today);
     const entities = writeEntityFiles(this.registry(), root, this.context.today);
-    const { projects, interests, rejections, review } = this.concepts;
-    writeConceptFiles(projects, interests, rejections, root, review);
+    const { projects, interests, rejections, review, trace } = this.concepts;
+    writeConceptFiles(projects, interests, rejections, root, review, trace);
     writeRootIndex(
       this.userEmail,
       evidence,
@@ -126,6 +126,7 @@ class BrainBuild {
           "(organizations/INDEX.md holds the organizations).",
         `- projects/INDEX.md — ${projects.length} durable, outcome-oriented efforts across threads.`,
         `- interests/INDEX.md — ${interests.length} recurring interests, pursued vs receipts-only.`,
+        "- concepts/TRACE.md — every judged concept proposal and the stages that kept, merged, or dropped it.",
         `- open_loops/INDEX.md — ${entities.openLoops} unresolved commitments and pending items, newest first.`,
         "- evidence/inbox-<year>.md — every other inbox thread of the last two years; rows marked body " +
           "have raw messages in evidence/threads/<id>.md, rows marked header need read_email.",

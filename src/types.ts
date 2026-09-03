@@ -191,7 +191,7 @@ export interface ThreadCluster {
   key: string;
   anchor: string;
   aliases: string[];
-  kind: "entity" | "domain";
+  kind: "entity" | "domain" | "topic";
   threadIds: string[];
 }
 
@@ -293,12 +293,77 @@ export interface ClusterJudgment {
   projects: ClusteredProject[];
   interests: ClusteredInterest[];
   rejections: RejectionCounts;
+  proposals: {
+    projects: JudgeProposalTraceSource[];
+    interests: JudgeProposalTraceSource[];
+  };
+}
+
+export interface JudgeProposalTraceSource {
+  name: string;
+  cluster: string;
+  citations: Citation[];
+  gateInputIndex?: number;
+  rejectedBy?: string;
+}
+
+/** Per-proposal gate accounting, kept separate from aggregate rejection counters. */
+export interface GateRuleOutcome {
+  proposalIndex: number;
+  name: string;
+  passed: boolean;
+  counters: RejectionCounts;
+}
+
+export interface GateRuleResult<T> {
+  accepted: T[];
+  acceptedProposalIndexes: number[];
+  outcomes: GateRuleOutcome[];
+}
+
+export interface ProposalGateOutcome extends GateRuleOutcome {
+  dedupe?: { outcome: "passed" } | { outcome: "collapsed"; counter: string; into: string };
+  /** Position in the accepted list, or the survivor's position after a collapse. */
+  outputIndex?: number;
 }
 
 export interface ConceptGateResult {
   projects: Project[];
   interests: Interest[];
   rejections: RejectionCounts;
+  outcomes: {
+    projects: ProposalGateOutcome[];
+    interests: ProposalGateOutcome[];
+  };
+}
+
+export interface ConceptReviewOutcome {
+  inputIndex: number;
+  name: string;
+  verdict: "kept" | "merged" | "umbrella" | "demoted";
+  into?: string;
+  reason?: string;
+  outputIndex?: number;
+}
+
+export interface ConceptTraceStage {
+  stage: "judge" | "initial_gates" | "initial_dedupe" | "review" | "final_gates" | "final_dedupe";
+  outcome: "passed" | "rejected" | "collapsed" | "kept" | "merged" | "umbrella" | "demoted";
+  counters?: RejectionCounts;
+  into?: string;
+  reason?: string;
+}
+
+/** One original judge proposal and every deterministic or reviewed disposition it reached. */
+export interface ConceptTrace {
+  name: string;
+  kind: "project" | "interest";
+  sourceClusterKey: string;
+  sourceClusterKind: ThreadCluster["kind"] | "unknown";
+  citations: Citation[];
+  stages: ConceptTraceStage[];
+  finalFile?: string;
+  droppedAt?: ConceptTraceStage["stage"];
 }
 
 export interface OpenLoopRow extends Citation {

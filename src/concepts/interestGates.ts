@@ -9,8 +9,10 @@ import {
   INTEREST_EVIDENCE_ROLES,
   INTEREST_KINDS,
   INTEREST_STATES,
+  mergeRejections,
   reject,
   type EvidenceRow,
+  type GateRuleResult,
   type Interest,
   type InterestEvidenceRole,
   type RejectionCounts,
@@ -106,42 +108,59 @@ export function keepInterestsThatPass(
   context: EvidenceContext,
   allowed: Record<string, Set<string>>,
   counts: RejectionCounts,
-): Interest[] {
+): GateRuleResult<Interest> {
   const accepted: Interest[] = [];
+  const acceptedProposalIndexes: number[] = [];
+  const outcomes: GateRuleResult<Interest>["outcomes"] = [];
   const takenTopics = new Set<string>();
-  for (const source of proposals) {
+  for (const [proposalIndex, source] of proposals.entries()) {
+    const proposalCounts: RejectionCounts = {};
+    const finish = (passed: boolean): void => {
+      mergeRejections(counts, proposalCounts);
+      outcomes.push({
+        proposalIndex,
+        name: cleanText(source.topic, 160) || "(unnamed interest)",
+        passed,
+        counters: proposalCounts,
+      });
+    };
     const checked = keepValidEvidence(source.evidence, allowed, INTEREST_EVIDENCE_ROLES);
-    reject(counts, "interest_invalid_evidence", checked.invalid);
+    reject(proposalCounts, "interest_invalid_evidence", checked.invalid);
     const evidence = checked.evidence.filter(
       (row) => !STATE_ROLES.includes(row.role) || dayCanCarryState(context, row),
     );
-    reject(counts, "interest_automated_state_evidence", checked.evidence.length - evidence.length);
+    reject(proposalCounts, "interest_automated_state_evidence", checked.evidence.length - evidence.length);
     if (new Set(evidence.map((row) => row.threadId)).size < 2) {
-      reject(counts, "interest_insufficient_threads");
+      reject(proposalCounts, "interest_insufficient_threads");
+      finish(false);
       continue;
     }
     // Recurrence means the user's own behavior repeats, in two threads and on two days; several notices
     // from one purchase or incident satisfy neither.
     const positive = evidence.filter((row) => POSITIVE.has(row.role));
     if (new Set(positive.map((row) => row.threadId)).size < 2) {
-      reject(counts, "interest_insufficient_behavioral_threads");
+      reject(proposalCounts, "interest_insufficient_behavioral_threads");
+      finish(false);
       continue;
     }
     if (new Set(positive.map((row) => row.day)).size < 2) {
-      reject(counts, "interest_insufficient_distinct_episode_dates");
+      reject(proposalCounts, "interest_insufficient_distinct_episode_dates");
+      finish(false);
       continue;
     }
     const topic = cleanText(source.topic, 160);
     const summary = cleanText(source.summary, 700);
     if (!topic || !summary || takenTopics.has(topic.toLowerCase())) {
-      reject(counts, "interest_duplicate_or_empty");
+      reject(proposalCounts, "interest_duplicate_or_empty");
+      finish(false);
       continue;
     }
     takenTopics.add(topic.toLowerCase());
     // A person the user corresponds with belongs in the entity files, not in the interest list.
     const topicKey = normalizeNameKey(topic);
     if (topicKey && evidence.some((row) => context.people[row.threadId]?.has(topicKey))) {
-      reject(counts, "interest_is_person");
+      reject(proposalCounts, "interest_is_person");
+      finish(false);
       continue;
     }
     // Direct engagement needs the user in two threads; less is receipts and notices about them.
@@ -153,21 +172,28 @@ export function keepInterestsThatPass(
     accepted.push({
       topic,
       kind: source.kind,
-      currentState: correctInterestState(source, evidence, context, counts),
+      currentState: correctInterestState(source, evidence, context, proposalCounts),
       summary,
       firstSeen: firstMessageDay(context, evidence),
       lastSeen: latestDay(evidence),
       engagement: directThreads.size >= 2 ? "direct" : "passive",
       evidence,
-      narrative: keepGroundedNarrative(source.narrative, evidence, counts, "interest_narrative_dates_unsupported"),
+      narrative: keepGroundedNarrative(
+        source.narrative,
+        evidence,
+        proposalCounts,
+        "interest_narrative_dates_unsupported",
+      ),
       related: keepValidRelated(
         source.related,
         context,
         new Set(evidence.map((row) => row.threadId)),
-        counts,
+        proposalCounts,
         "interest_related_invalid",
       ),
     });
+    acceptedProposalIndexes.push(proposalIndex);
+    finish(true);
   }
-  return accepted;
+  return { accepted, acceptedProposalIndexes, outcomes };
 }

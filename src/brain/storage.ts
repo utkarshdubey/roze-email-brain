@@ -28,6 +28,7 @@ export function resolveBrainPaths(root?: string, account?: string) {
     evidenceThreadsDir: join(evidenceDir, "threads"),
     projectsDir: join(brainRoot, "projects"),
     interestsDir: join(brainRoot, "interests"),
+    conceptsDir: join(brainRoot, "concepts"),
     conceptsFile: join(brainRoot, "concepts.json"),
     threadsDir: join(brainRoot, "threads"),
     cacheDir,
@@ -70,6 +71,7 @@ export const VIEW_GLOBS_BY_SCOPE: Record<SearchScope, string[]> = {
   all: [
     "INDEX.md",
     ...RUBRIC_DIRECTORIES.map((name) => `${name}/*`),
+    "concepts/*",
     "threads/*",
     "evidence/*.md",
     "evidence/threads/*",
@@ -79,6 +81,7 @@ export const VIEW_GLOBS_BY_SCOPE: Record<SearchScope, string[]> = {
 export const PUBLISH_TARGETS = [
   "evidence",
   "threads",
+  "concepts",
   ...RUBRIC_DIRECTORIES,
   "INDEX.md",
   "meta.json",

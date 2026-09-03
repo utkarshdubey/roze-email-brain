@@ -277,6 +277,7 @@ test("generate publishes every target offline and reports only expected cost lan
       { threads: 2, messages: 2, promoted: 1, projects: 0 },
     );
     for (const target of PUBLISH_TARGETS) assert.ok(existsSync(join(root, target)), target);
+    assert.ok(existsSync(join(root, "concepts", "TRACE.md")), "the proposal trace is always published");
     assert.ok(existsSync(join(root, ".cache", USER, "threads")), "caches are scoped by account");
     const meta = JSON.parse(readFileSync(join(root, "meta.json"), "utf8"));
     assert.deepEqual(Object.keys(meta).sort(), [
@@ -288,7 +289,9 @@ test("generate publishes every target offline and reports only expected cost lan
       "userEmail",
     ]);
     assert.deepEqual(meta.build, { phase: 4, phases: 4, complete: true, pending: [] });
-    assert.match(readFileSync(join(root, "INDEX.md"), "utf8"), /Build status: complete\./u);
+    const rootIndex = readFileSync(join(root, "INDEX.md"), "utf8");
+    assert.match(rootIndex, /Build status: complete\./u);
+    assert.match(rootIndex, /concepts\/TRACE\.md — every judged concept proposal/u);
     assert.match(diagnostics.join(""), /expected ≈ \$/u);
     assert.doesNotMatch([...output, ...diagnostics].join(""), /hard (cost )?ceiling/iu);
   } finally {

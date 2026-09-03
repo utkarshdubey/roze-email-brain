@@ -12,7 +12,7 @@ import { validateStoredConceptDocument } from "../src/concepts/applyGates.js";
 import { writeConceptFiles } from "../src/brain/renderConcepts.js";
 import type { PipelineContext } from "../src/context.js";
 import { readJson } from "../src/shared/atomicFiles.js";
-import type { ConceptReviewLog } from "../src/types.js";
+import type { ConceptReviewLog, ConceptTrace } from "../src/types.js";
 import { brainMetaSchema, loadCachedBrain } from "./publishedBrain.js";
 import { runAsScript } from "./script.js";
 
@@ -52,7 +52,8 @@ function tree(root: string): Tree {
 function conceptTree(root: string): Tree {
   const files = new Map<string, Buffer>();
   let symlinks = 0;
-  for (const name of ["projects", "interests"]) {
+  for (const name of ["projects", "interests", "concepts"]) {
+    if (!existsSync(join(root, name))) continue;
     const part = tree(join(root, name));
     symlinks += part.symlinks;
     for (const [key, value] of part.files) files.set(`${name}/${key}`, value);
@@ -98,11 +99,12 @@ function compareRenderedFiles(
   gated: ReturnType<typeof validateStoredConceptDocument>,
   rejected: Record<string, number>,
   review: ConceptReviewLog | undefined,
+  trace: ConceptTrace[] | undefined,
   publishedRoot: string,
 ): RenderComparison {
   const temporary = mkdtempSync(join(tmpdir(), "roze-concept-validation-"));
   try {
-    writeConceptFiles(gated.projects, gated.interests, rejected, temporary, review);
+    writeConceptFiles(gated.projects, gated.interests, rejected, temporary, review, trace);
     const expected = conceptTree(temporary);
     const actual = conceptTree(publishedRoot);
     return {
@@ -172,7 +174,8 @@ async function validateConcepts(brainRoot?: string) {
   if (!unchanged) issues.stored_collections_changed_on_revalidation = 1;
 
   const review = (document as { review?: ConceptReviewLog }).review;
-  const comparison = compareRenderedFiles(gated, summary.data.rejected, review, paths.root);
+  const trace = (document as { trace?: ConceptTrace[] }).trace;
+  const comparison = compareRenderedFiles(gated, summary.data.rejected, review, trace, paths.root);
   for (const [key, rows] of Object.entries(comparison.drift))
     if (rows.length) issues[`rendered_files_${key}`] = rows.length;
   if (comparison.symlinks) issues.rendered_symlinks = comparison.symlinks;

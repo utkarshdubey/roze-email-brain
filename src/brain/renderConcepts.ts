@@ -1,9 +1,19 @@
-// One file per durable project and per recurring interest, their two indexes, and the `concepts.json` the
-// review pass and the offline validator read back. Every claim carries thread citations.
+// One file per durable project and recurring interest, their indexes, the proposal trace, and the
+// `concepts.json` the review pass and offline validator read back. Every claim carries thread citations.
 import { join } from "node:path";
+import { TRACE_FINAL_TARGET, type TracedConcept } from "../concepts/conceptTrace.js";
 import { clearMarkdownDirectory, ensureDirectory, writeFileAtomically } from "../shared/atomicFiles.js";
-import { cleanText, createSlug, hashText } from "../shared/text.js";
-import type { Citation, ConceptReviewLog, Interest, Project, RejectionCounts, RelatedThread } from "../types.js";
+import { cleanText, compareText, createSlug, hashText } from "../shared/text.js";
+import type {
+  Citation,
+  ConceptReviewLog,
+  ConceptTrace,
+  ConceptTraceStage,
+  Interest,
+  Project,
+  RejectionCounts,
+  RelatedThread,
+} from "../types.js";
 
 const renderCitations = (evidence: readonly Citation[]): string =>
   evidence.map((row) => `[t:${row.threadId} ${row.day}]`).join(" ");
@@ -116,7 +126,7 @@ function chooseSafeSlugs<T>(rows: readonly T[], nameOf: (row: T) => string): str
   });
 }
 
-function writeProjectViews(root: string, projects: readonly Project[]): void {
+function writeProjectViews(root: string, projects: readonly Project[]): string[] {
   const directory = join(root, "projects");
   const index = [
     "# Durable projects",
@@ -140,9 +150,10 @@ function writeProjectViews(root: string, projects: readonly Project[]): void {
     index.push("- none");
   }
   writeFileAtomically(join(directory, "INDEX.md"), `${index.join("\n")}\n`);
+  return slugs;
 }
 
-function writeInterestViews(root: string, interests: readonly Interest[]): void {
+function writeInterestViews(root: string, interests: readonly Interest[]): string[] {
   const directory = join(root, "interests");
   const index = [
     "# Recurring interests",
@@ -173,6 +184,80 @@ function writeInterestViews(root: string, interests: readonly Interest[]): void 
     ...(lines.passive.length ? lines.passive : ["- none"]),
   );
   writeFileAtomically(join(directory, "INDEX.md"), `${index.join("\n")}\n`);
+  return slugs;
+}
+
+function storedTrace(
+  trace: readonly ConceptTrace[],
+  projectSlugs: readonly string[],
+  interestSlugs: readonly string[],
+): ConceptTrace[] {
+  return trace.map((entry) => {
+    const { [TRACE_FINAL_TARGET]: target, ...stored } = entry as TracedConcept;
+    if (!target) {
+      return stored;
+    }
+    const slugs = target.kind === "project" ? projectSlugs : interestSlugs;
+    const slug = slugs[target.index];
+    if (!slug) {
+      throw new Error(`Concept trace points outside the final ${target.kind} list`);
+    }
+    return { ...stored, finalFile: `${target.kind}s/${slug}.md` };
+  });
+}
+
+const stageRank = (stage: ConceptTraceStage["stage"]): number =>
+  ["judge", "initial_gates", "initial_dedupe", "review", "final_gates", "final_dedupe"].indexOf(stage);
+
+function traceOutcome(stage: ConceptTraceStage): string {
+  const counters = Object.entries(stage.counters ?? {})
+    .sort(([left], [right]) => compareText(left, right))
+    .map(([name, count]) => `\`${name}\`${count === 1 ? "" : ` × ${count}`}`)
+    .join(", ");
+  const detail = counters ? ` (${counters})` : "";
+  if (stage.outcome === "collapsed") return `collapsed into **${stage.into}**${detail}`;
+  if (stage.outcome === "merged") return `merged into **${stage.into}**`;
+  if (stage.outcome === "umbrella") return `included in umbrella **${stage.into}**`;
+  if (stage.outcome === "demoted") return `demoted: ${stage.reason}`;
+  if (stage.outcome === "rejected") return `rejected${detail}`;
+  return `${stage.outcome}${detail}`;
+}
+
+function renderTrace(trace: readonly ConceptTrace[]): string {
+  const ordered = [...trace].sort((left, right) => {
+    const leftRank = left.finalFile ? 6 : Math.max(...left.stages.map((stage) => stageRank(stage.stage)));
+    const rightRank = right.finalFile ? 6 : Math.max(...right.stages.map((stage) => stageRank(stage.stage)));
+    const leftDay = left.citations.map((citation) => citation.day).sort().at(-1) ?? "";
+    const rightDay = right.citations.map((citation) => citation.day).sort().at(-1) ?? "";
+    return rightRank - leftRank || compareText(rightDay, leftDay) || compareText(left.name, right.name);
+  });
+  const lines = [
+    "# Concept proposal trace",
+    "",
+    "Every cluster-judge proposal, ordered by the latest stage it reached and then newest evidence. " +
+      "Stages inside each proposal are newest first.",
+  ];
+  if (!ordered.length) {
+    lines.push("", "- none");
+    return `${lines.join("\n")}\n`;
+  }
+  for (const entry of ordered) {
+    lines.push("", `## ${entry.name} (${entry.kind})`);
+    if (entry.finalFile) {
+      lines.push(`- Final file: ${entry.finalFile}`);
+    } else if (entry.droppedAt) {
+      lines.push(`- Dropped at: ${entry.droppedAt}`);
+    }
+    for (const stage of [...entry.stages].reverse()) {
+      lines.push(`- ${stage.stage}: ${traceOutcome(stage)}`);
+    }
+    const citations = renderCitations(entry.citations);
+    lines.push(
+      `- Judge source: \`${entry.sourceClusterKey}\` (${entry.sourceClusterKind}); ` +
+        `cited ${citations || "no threads"}`,
+    );
+  }
+  return `${lines.join("\n")}\n`;
 }
 
 export function writeConceptFiles(
@@ -181,12 +266,29 @@ export function writeConceptFiles(
   rejections: Readonly<RejectionCounts>,
   root: string,
   review?: Readonly<ConceptReviewLog>,
+  trace?: readonly ConceptTrace[],
 ): void {
   ensureDirectory(root);
-  writeProjectViews(root, projects);
-  writeInterestViews(root, interests);
+  const projectSlugs = writeProjectViews(root, projects);
+  const interestSlugs = writeInterestViews(root, interests);
+  const publishedTrace = trace === undefined ? undefined : storedTrace(trace, projectSlugs, interestSlugs);
+  if (publishedTrace) {
+    const directory = join(root, "concepts");
+    clearMarkdownDirectory(directory);
+    writeFileAtomically(join(directory, "TRACE.md"), renderTrace(publishedTrace));
+  }
   writeFileAtomically(
     join(root, "concepts.json"),
-    `${JSON.stringify({ projects, interests, rejected: rejections, ...(review ? { review } : {}) }, null, 2)}\n`,
+    `${JSON.stringify(
+      {
+        projects,
+        interests,
+        rejected: rejections,
+        ...(review ? { review } : {}),
+        ...(publishedTrace ? { trace: publishedTrace } : {}),
+      },
+      null,
+      2,
+    )}\n`,
   );
 }
