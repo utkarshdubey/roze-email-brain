@@ -39,12 +39,16 @@ The command publishes these phases in order:
    extracted. The fast inbox header request overlaps this model-bound extraction.
 2. `fast-inbox`: a newest-first two-year header sample excludes obvious automated senders and learns
    consistently automated bulk domains. A model chooses useful senders to promote.
-3. `complete-inbox`: all eligible inbox headers are indexed, including automated senders; newly
-   promoted threads are fetched and extracted.
+3. `complete-inbox`: every eligible inbox thread is indexed, including automated senders; newly
+   promoted threads are fetched and extracted. The backfill lists threads and reads each thread the
+   fast pass never covered in full (10 quota units) rather than one metadata header (5), so the body
+   phase finds it already cached and no skim thread is ever fetched twice. Its index row is derived
+   from the thread's first message, in the same fields a metadata read would have produced.
 4. `body-evidence`: raw bodies for every remaining indexed thread are fetched and stored, but never
    extracted. This costs Gmail time, not model tokens.
-5. `concepts`: projects and interests are synthesized last because receipts found in body-only mail
-   feed recurring-interest review.
+5. `concepts`: cards, tags, clusters, judge, and the first gates run while phase 4 downloads bodies;
+   the whole-list review, its gates, and the related-thread search run once both finish, because
+   receipts found in body-only mail feed the recurring-interest review.
 
 Every enabled phase renders a complete brain. `--publish-once` skips only the intermediate swaps,
 not the work or order. `--no-skim` removes phases 2–4; `--no-synthesize` removes phase 5;

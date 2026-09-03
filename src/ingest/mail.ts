@@ -1,9 +1,10 @@
 // What `generate` needs out of Gmail and in what order: full reads for mail the user took part in (sent,
-// starred, or pulled on demand), and a two-year header skim that finds the rest without paying for bodies.
-// Both are resumable and deterministically ordered.
+// starred, or pulled on demand), and a two-year skim that finds the rest — headers in the fast pass, one
+// full read per uncovered thread in the backfill. Both are resumable and deterministically ordered.
 
 import { mapAtLimitedConcurrency, type PipelineContext } from "../context.js";
 import { isExhaustedQuota, isSkippableGmailItem, type GmailProfile } from "../gmail/client.js";
+import { cleanSnippet } from "../shared/text.js";
 import { collapseHeadersToThreads, looksLikeAHuman, type EmailThread, type MessageHeader } from "../types.js";
 import {
   appendHeaderRows,
@@ -53,6 +54,8 @@ interface HeaderIngestClient {
   listMessageIds(query: string, limit?: number): Promise<string[]>;
   fetchMessageHeaders(id: string): Promise<MessageHeader>;
 }
+/** The skim lists headers for speed and full threads for the backfill, so it needs both listings. */
+type SkimIngestClient = ThreadIngestClient & HeaderIngestClient;
 export interface GmailReader extends ThreadIngestClient, HeaderIngestClient {
   getProfile(): Promise<GmailProfile>;
 }
@@ -183,12 +186,42 @@ async function fetchMissingHeaders(
 }
 
 /**
+ * The same row `fetchMessageHeaders` would return for the thread's first message, so an index row built
+ * from a full thread renders byte-identically to one built from a metadata read: identical fields off the
+ * identical parse, with the snippet cleaned here exactly as the metadata path cleans it. `count` is the
+ * thread's own message count, which is what "messages seen in that thread" now means once the whole thread
+ * has been read.
+ */
+export function headerRowFromThread(thread: EmailThread): MessageHeader | undefined {
+  const first = thread.messages[0];
+  if (!first) return undefined;
+  return {
+    id: first.id,
+    threadId: first.threadId || thread.id,
+    timestamp: first.timestamp,
+    day: first.day,
+    fromName: first.fromName,
+    fromEmail: first.fromEmail,
+    subject: first.subject,
+    labels: first.labels,
+    listId: first.listId,
+    count: thread.messages.length,
+    snippet: cleanSnippet(first.snippet),
+  };
+}
+
+/**
  * "fast" excludes automated senders at the listing (a newest-first sample teaches which bulk domains to
  * skip) so people surface in minutes; "complete" lists everything, so promotion can still reach the
  * automated senders that matter.
+ *
+ * The backfill lists threads rather than messages and reads each uncovered thread in full (10 units)
+ * instead of one metadata header (5): the body phase then finds it already in the thread cache, so a skim
+ * thread costs one Gmail read instead of two. The fast pass stays header-only — its job is to surface
+ * people within minutes, and a header is half the units and a fraction of the bytes.
  */
 export async function fetchRecentInboxHeaders(
-  client: HeaderIngestClient,
+  client: SkimIngestClient,
   context: PipelineContext,
   mode: "fast" | "complete" = "fast",
 ): Promise<MessageHeader[]> {
@@ -204,6 +237,23 @@ export async function fetchRecentInboxHeaders(
       byId.set(row.id, row);
     }
   };
+  /** Threads the fast pass already indexed keep their rows; the rest are read once, in full. */
+  const backfillThreads = async (ids: readonly string[], label: string): Promise<void> => {
+    const indexed = new Set([...byId.values()].map((row) => row.threadId));
+    const fetched = await fetchThreadsById(
+      client,
+      ids.filter((id) => !indexed.has(id)),
+      context,
+      label,
+    );
+    // Threads are cached one file at a time by the fetch, so an interrupted backfill resumes for free and
+    // only the derived rows are rewritten.
+    const rows = fetched.flatMap((thread) => headerRowFromThread(thread) ?? []);
+    appendHeaderRows(rows, context.paths);
+    for (const row of rows) {
+      byId.set(row.id, row);
+    }
+  };
   if (mode === "fast") {
     await fetchUncached(await client.listMessageIds(buildSkimQuery(), SKIM_SAMPLE), "skim sample");
     const excluded = learnAutomatedDomains([...byId.values()]);
@@ -213,7 +263,7 @@ export async function fetchRecentInboxHeaders(
     );
     await fetchUncached(await client.listMessageIds(buildSkimQuery(excluded), 100_000), "skim");
   } else {
-    await fetchUncached(await client.listMessageIds(SKIM_QUERY, 100_000), "skim backfill");
+    await backfillThreads(await client.listThreadIds(SKIM_QUERY, 100_000), "skim backfill");
   }
   return collapseHeadersToThreads([...byId.values()]).sort(
     (a, b) => b.timestamp - a.timestamp || a.threadId.localeCompare(b.threadId),

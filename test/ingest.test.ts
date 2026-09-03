@@ -147,6 +147,7 @@ test("the skim learns bulk domains from a sample and excludes them from the seco
   try {
     const queries: string[] = [];
     const fetched: string[] = [];
+    const threadsRead: string[] = [];
     const rows: Record<string, MessageHeader> = {
       a1: header("digest@bulk.example", "a1", 3),
       a2: header("digest@bulk.example", "a2", 2),
@@ -165,6 +166,15 @@ test("the skim learns bulk domains from a sample and excludes them from the seco
         fetched.push(id);
         return { ...rows[id]!, id };
       },
+      // The backfill lists threads; "b1" is the one the automated-sender exclusions hid from the fast pass.
+      async listThreadIds(query: string, limit = 100_000) {
+        queries.push(query);
+        return [...Object.keys(rows), "b1"].slice(0, limit);
+      },
+      async fetchThread(id: string) {
+        threadsRead.push(id);
+        return { id, messages: [message(id, "2026-08-20", "billing@bulk.example", "Statement ready")] };
+      },
     };
     const skim = await fetchRecentInboxHeaders(client, context(root, {}));
     assert.deepEqual(
@@ -178,14 +188,34 @@ test("the skim learns bulk domains from a sample and excludes them from the seco
     );
     assert.match(queries[1]!, / -from:bulk\.example$/u);
     assert.equal(fetched.length, 5, "every id from the sample listing is fetched once");
-    await fetchRecentInboxHeaders(client, context(root, {}), "complete");
+    const complete = await fetchRecentInboxHeaders(client, context(root, {}), "complete");
     assert.equal(queries.length, 3);
     assert.equal(
       queries[2],
       "newer_than:2y -in:sent -in:chats -category:promotions -category:social",
       "the backfill lists without exclusions",
     );
-    assert.equal(fetched.length, 5, "the backfill fetches nothing already cached");
+    assert.equal(fetched.length, 5, "the backfill never reads a metadata header");
+    assert.deepEqual(threadsRead, ["b1"], "it reads the one uncovered thread in full, and the covered ones not at all");
+    assert.deepEqual(
+      complete.find((row) => row.threadId === "b1"),
+      {
+        id: "b1-2026-08-20-billing@bulk.example",
+        threadId: "b1",
+        timestamp: Date.parse("2026-08-20T13:00:00Z") / 1_000,
+        day: "2026-08-20",
+        fromName: "billing",
+        fromEmail: "billing@bulk.example",
+        subject: "Statement ready",
+        labels: [],
+        listId: "",
+        count: 1,
+        snippet: "Useful update",
+      },
+      "the index row is derived from the fetched thread's first message",
+    );
+    await fetchRecentInboxHeaders(client, context(root, {}), "complete");
+    assert.deepEqual(threadsRead, ["b1"], "and a rerun re-derives the row from the thread cache for free");
     assert.deepEqual(learnAutomatedDomains([rows.a1!, rows.a2!, rows.h1!]), [], "three automated rows are required");
     assert.deepEqual(learnAutomatedDomains([rows.a1!, rows.a2!, rows.a3!, header("alerts@x.example", "x", 1)]), [
       "bulk.example",

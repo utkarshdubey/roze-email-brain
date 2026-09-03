@@ -328,7 +328,7 @@ test("judge batches are hash-bucketed so a changed cluster leaves the other batc
   for (const batch of unchanged) assert.ok(after.map(key).includes(batch), `batch ${batch} should survive unchanged`);
 });
 
-test("bodies are fetched before concepts so receipts can feed interests", () => {
+test("bodies still publish before concepts so receipts can feed the interest review", () => {
   assert.deepEqual(planPhases({ noPromote: false, noSynthesize: false, noSkim: false, publishOnce: false }), [
     "full-read",
     "fast-inbox",

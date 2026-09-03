@@ -33,6 +33,7 @@ and [[NOTES]] (decisions and tradeoffs); this vault holds the *why* behind them 
 - [[Interests are two-tier]]
 - [[Lightweight, no frameworks]]
 - [[One status board owns the terminal]]
+- [[Read each inbox thread once]]
 - [[Deferred features]]
 
 ## Product brief (what it is judged against)

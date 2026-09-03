@@ -14,7 +14,9 @@ complete staged swap (`--publish-once` swaps only at the end, for rebuilds over 
    under deterministic caps (25, 5 within 180 days, 1).
 3. **Complete inbox** — the full header index, so automated senders that matter (banks, tools, recruiting
    systems) can still be promoted.
-4. **Raw bodies** — every remaining inbox thread stored as searchable, citable evidence, never extracted
+4. **Raw bodies** — every remaining inbox thread stored as searchable, citable evidence, never extracted.
+   Threads the complete backfill already read in full come from the cache; the concept judge runs
+   concurrently with this download (see [[Read each inbox thread once]])
    (Gmail time only). See [[Bodies before concepts]].
 5. **Concepts** — projects and interests. See [[Concept layer]].
 

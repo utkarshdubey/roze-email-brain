@@ -200,10 +200,17 @@ export class EnronMaildirClient implements GmailReader {
       historyId: "enron-maildir",
     };
   }
+  /**
+   * `in:sent` lists participated threads. Every other query is the skim's own listing, whose `-in:sent`
+   * drops only threads that are entirely the user's own mail, exactly as Gmail's thread search does.
+   */
   async listThreadIds(query: string, limit = 100_000): Promise<string[]> {
     if (query.startsWith("is:starred")) return [];
-    const threads = [...this.#threads.values()].filter(
-      (thread) => !query.startsWith("in:sent") || this.#participated(thread),
+    const participation = query.startsWith("in:sent");
+    const threads = [...this.#threads.values()].filter((thread) =>
+      participation
+        ? this.#participated(thread)
+        : thread.messages.some((message) => message.fromEmail !== this.userEmail),
     );
     return threads.map((thread) => thread.id).slice(0, limit);
   }

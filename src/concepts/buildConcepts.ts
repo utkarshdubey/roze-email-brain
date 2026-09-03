@@ -19,6 +19,7 @@ import {
   type RejectionCounts,
   type RelatedThread,
   type ThreadCard,
+  type ThreadCluster,
   type ThreadExtraction,
 } from "../types.js";
 import { rejectWhatTheModelGetsWrong } from "./applyGates.js";
@@ -240,17 +241,29 @@ function attachRelatedThreads(
 // THE FLOW — every stage in order, and the counters that explain the result.
 
 /**
- * `bodies` (fetched, never extracted) and `loops` are deterministic context the review may cite beside
- * the clusters' own threads, and the reason concepts run last.
+ * Everything the review half needs from the judge half. The seam is where the bodies start to matter:
+ * nothing above it reads a message body, so the judge can run while Gmail is still fetching them.
  */
-export async function buildConcepts(
+export interface JudgedConcepts {
+  cards: ThreadCard[];
+  tags: DomainTags;
+  clusters: ThreadCluster[];
+  /** The thread ids the clusters covered; the gates refuse citations outside it. */
+  scope: Set<string>;
+  rejections: RejectionCounts;
+  projects: Project[];
+  interests: Interest[];
+  /** The ledger's call count when synthesis started, so conceptSynthesisApiCalls stays synthesis-only. */
+  callsBefore: number;
+}
+
+/** Cards → tags → clusters → judge → gates: the model-only half, which needs no message body. */
+export async function judgeConceptCandidates(
   extractions: readonly ThreadExtraction[],
   threads: readonly EmailThread[],
   userEmail: string,
   context: PipelineContext,
-  bodies: readonly EmailThread[],
-  loops: readonly OpenLoopRow[],
-): Promise<BuiltConcepts> {
+): Promise<JudgedConcepts> {
   const callsBefore = usageLedger.total().calls;
   const cards = makeThreadCards(extractions, threads, userEmail);
   const tags = await tagLifeDomains(cards, userEmail, context);
@@ -268,8 +281,29 @@ export async function buildConcepts(
     userEmail,
   );
   mergeRejections(rejections, gated.rejections);
+  const { projects, interests } = gated;
+  return { cards, tags, clusters, scope, rejections, projects, interests, callsBefore };
+}
+
+/**
+ * Review → gates → related threads: the half that needs every stored body, both for the recurring
+ * merchants the review consolidates against and for the citations the final gates check. `bodies`
+ * (fetched, never extracted) and `loops` are deterministic context the review may cite beside the
+ * clusters' own threads, and the reason concepts finish last.
+ */
+export async function reviewAndFinishConcepts(
+  judged: JudgedConcepts,
+  extractions: readonly ThreadExtraction[],
+  threads: readonly EmailThread[],
+  userEmail: string,
+  context: PipelineContext,
+  sources: { bodies: readonly EmailThread[]; loops: readonly OpenLoopRow[] },
+): Promise<BuiltConcepts> {
+  const { cards, tags, clusters, scope, callsBefore } = judged;
+  const { bodies, loops } = sources;
+  const rejections: RejectionCounts = { ...judged.rejections };
   const merchants = recurringMerchants([...threads, ...bodies]);
-  const reviewed = await reviewConcepts(gated.projects, gated.interests, loops, merchants, userEmail, context);
+  const reviewed = await reviewConcepts(judged.projects, judged.interests, loops, merchants, userEmail, context);
   mergeRejections(rejections, reviewed.log.rejections);
   // The review could also cite loops and merchant receipts, so the scope widens by exactly those.
   const reviewScope = new Set([...scope, ...reviewed.extraThreadIds]);
@@ -309,6 +343,19 @@ export async function buildConcepts(
       conceptSynthesisApiCalls: usageLedger.total().calls - callsBefore,
     },
   };
+}
+
+/** The whole flow in one call, for the concept rebuild bench and for tests; generate overlaps the halves. */
+export async function buildConcepts(
+  extractions: readonly ThreadExtraction[],
+  threads: readonly EmailThread[],
+  userEmail: string,
+  context: PipelineContext,
+  bodies: readonly EmailThread[],
+  loops: readonly OpenLoopRow[],
+): Promise<BuiltConcepts> {
+  const judged = await judgeConceptCandidates(extractions, threads, userEmail, context);
+  return reviewAndFinishConcepts(judged, extractions, threads, userEmail, context, { bodies, loops });
 }
 
 // COST ESTIMATE — what `--budget` shows before any of the above is allowed to spend.

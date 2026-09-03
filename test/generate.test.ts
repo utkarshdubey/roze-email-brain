@@ -45,8 +45,9 @@ class FakeGmail implements GmailReader {
       snippet: "Useful",
     };
   }
-  async listThreadIds() {
-    return ["sent"];
+  // The participation queries name the sent and starred tiers; anything else is the skim's own listing.
+  async listThreadIds(query: string) {
+    return query.startsWith("newer_than:") ? ["promoted", "bodyonly"] : ["sent"];
   }
   async fetchThread(id: string): Promise<EmailThread> {
     if (id === "bodyonly")
@@ -83,6 +84,151 @@ function successfulModel(kinds: string[]): CallModel {
     return request.schema.parse(value);
   };
 }
+
+/**
+ * A mailbox whose fast skim lists one newsletter message and whose backfill listing adds a second thread
+ * the automation exclusions hid. `gate`, when given, holds the fast-skim thread's body until it settles,
+ * so a body fetch can be made to depend on the concept judge having started.
+ */
+class SkimGmail implements GmailReader {
+  readonly threadReads: string[] = [];
+  constructor(private readonly gate?: Promise<void>) {}
+  async getProfile() {
+    return { emailAddress: USER, messagesTotal: 3, threadsTotal: 3, historyId: "history-8" };
+  }
+  async listMessageIds() {
+    return ["header-1"];
+  }
+  async fetchMessageHeaders(id: string): Promise<MessageHeader> {
+    return {
+      id,
+      threadId: "fastskim",
+      timestamp: Date.parse("2026-08-27T13:00:00Z") / 1_000,
+      day: "2026-08-27",
+      fromName: "Shop",
+      fromEmail: "newsletter@shop.example",
+      subject: "Weekly deals",
+      labels: [],
+      listId: "",
+      snippet: "Deals",
+    };
+  }
+  async listThreadIds(query: string) {
+    return query.startsWith("newer_than:") ? ["fastskim", "backfilled"] : ["sent"];
+  }
+  async fetchThread(id: string): Promise<EmailThread> {
+    this.threadReads.push(id);
+    if (id === "fastskim") {
+      await this.gate;
+      return { id, messages: [message(id, "2026-08-27", "newsletter@shop.example", "Weekly deals")] };
+    }
+    if (id === "backfilled")
+      return { id, messages: [message(id, "2026-08-26", "billing@bank.example", "Statement ready")] };
+    return { id, messages: [message(id, "2026-08-28", USER)] };
+  }
+}
+
+/** Ignores every sender, tags nothing, and judges no cluster, so only the call sequence is under test. */
+function emptyConceptModel(kinds: string[], onConceptCall: () => void = () => undefined): CallModel {
+  return async (request) => {
+    kinds.push(request.kind);
+    if (request.kind === "promotion") return request.schema.parse({ decisions: [] });
+    if (request.kind === "topics") {
+      onConceptCall();
+      return request.schema.parse({ threads: [] });
+    }
+    if (request.kind === "judge") {
+      onConceptCall();
+      return request.schema.parse({ clusters: [] });
+    }
+    return request.schema.parse({
+      summary: "A note.",
+      state: "none",
+      state_note: "",
+      mentions: [],
+      items: [],
+    });
+  };
+}
+
+test("the complete backfill caches the threads it reads, so the body phase never fetches them twice", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "roze-generate-backfill-"));
+  const root = join(workspace, "brain");
+  try {
+    const kinds: string[] = [];
+    const output: string[] = [];
+    const client = new SkimGmail();
+    const metadata = await runGenerateCommand(["--no-synthesize"], {
+      root,
+      client,
+      callModel: emptyConceptModel(kinds),
+      today: "2026-09-02",
+      write: (text) => output.push(text),
+      writeError: () => undefined,
+    });
+    assert.deepEqual(
+      client.threadReads,
+      ["sent", "backfilled", "fastskim"],
+      "the backfill reads its thread in full once and the body phase reads only the fast-skim thread",
+    );
+    assert.ok(
+      existsSync(join(root, ".cache", USER, "threads", "backfilled.json")),
+      "the backfilled thread is in the thread cache before the body phase starts",
+    );
+    assert.equal(metadata?.counts.bodyThreads, 2, "both skim threads still have raw bodies");
+    assert.match(output.join(""), /Phase 4\/4 published after \d+s: raw bodies stored for 2 of 2/u);
+    assert.match(
+      readFileSync(join(root, "evidence", "inbox-2026.md"), "utf8"),
+      /^backfilled \| 2026-08-26 \| billing@bank\.example \| auto \| 1 msgs \| Statement ready \| Useful update \| body$/mu,
+      "and its index row is derived from the thread, in the row format a metadata read would have produced",
+    );
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("the concept judge runs while the bodies are still being fetched", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "roze-generate-overlap-"));
+  const root = join(workspace, "brain");
+  let openGate: () => void = () => undefined;
+  let failGate: (error: Error) => void = () => undefined;
+  const gate = new Promise<void>((accept, reject) => {
+    openGate = accept;
+    failGate = reject;
+  });
+  // Without the overlap the body fetch would wait forever; the timer turns that into a named failure.
+  const timer = setTimeout(() => failGate(new Error("the judge never ran while bodies were fetching")), 10_000);
+  try {
+    const kinds: string[] = [];
+    const output: string[] = [];
+    const client = new SkimGmail(gate);
+    let bodiesDone = false;
+    const metadata = await runGenerateCommand([], {
+      root,
+      client,
+      callModel: emptyConceptModel(kinds, () => {
+        assert.equal(bodiesDone, false, "the judge's first model call happens before the bodies are stored");
+        openGate();
+      }),
+      today: "2026-09-02",
+      write: (text) => {
+        bodiesDone ||= /Phase 4\/5 published/u.test(text);
+        output.push(text);
+      },
+      writeError: () => undefined,
+    });
+    assert.ok(kinds.includes("topics"), "the judge stage ran");
+    assert.match(
+      output.join(""),
+      /Phase 4\/5 published after \d+s: raw bodies stored for 2 of 2 remaining inbox threads, concepts judged alongside\.[\s\S]*Phase 5\/5 published after \d+s: 0 projects, 0 interests\./u,
+    );
+    assert.equal(metadata?.build.complete, true);
+    assert.equal(metadata?.counts.bodyThreads, 2);
+  } finally {
+    clearTimeout(timer);
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
 
 test("generate publishes every target offline and reports only expected cost language", async () => {
   const workspace = mkdtempSync(join(tmpdir(), "roze-generate-"));

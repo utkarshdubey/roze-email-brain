@@ -139,7 +139,15 @@ alerts, newsletters, or receipts. Generic tokens that collide with people (`team
 learns consistently automated domains. The complete backfill still lists everything: permanently
 excluding automation would have hidden 165 senders the promotion model chose on that mailbox.
 
-The first header skim is Gmail-bound while full-read extraction is model-bound, so they overlap.
+The backfill reads threads, not headers. A skim thread used to be paid for twice: one metadata read
+(5 units) to index it, then one thread read (10) for its body. Reading the thread once in phase 3 and
+deriving the index row from its first message costs 10 instead of 15 and leaves the body phase with a
+cache hit. The fast pass stays header-only: its job is to surface people within minutes.
+
+Gmail work and model work overlap wherever nothing depends on both: the first header skim overlaps
+full-read extraction, and body fetching overlaps concept judging, since only the review that follows
+needs the recurring merchants parsed from every stored body. `buildConcepts` is split at that seam into
+`judgeConceptCandidates` and `reviewAndFinishConcepts`, kept as their sequential composition for the bench.
 Each phase publishes a whole staged tree as soon as it is useful; a second terminal can query it and
 never sees half a generation. `--publish-once` changes only when swapping occurs, which is preferable
 during a rebuild when the old complete brain is more useful than a new partial one.

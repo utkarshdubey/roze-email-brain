@@ -5,7 +5,9 @@
 // `BrainBuild` accumulates the stage outputs and, at the end of every enabled phase, renders the whole
 // tree from whatever it has so far and swaps it into place atomically — which is why each phase leaves a
 // queryable brain behind and why `--publish-once` can skip the intermediate swaps without changing any of
-// the work or its order. Every paid stage is cost-checked against `--budget` first.
+// the work or its order. Every paid stage is cost-checked against `--budget` first. Gmail-bound work and
+// model-bound work overlap wherever nothing depends on both: the fast header skim runs beside the first
+// extraction, and the body fetch beside the concept judge.
 import { join } from "node:path";
 
 import { writeConceptFiles } from "../brain/renderConcepts.js";
@@ -14,7 +16,14 @@ import { writeEvidenceFiles } from "../brain/renderEvidence.js";
 import { writeRootIndex } from "../brain/renderRootIndex.js";
 import { writeThreadSummaries } from "../brain/renderThreadSummaries.js";
 import { stageThenSwap } from "../brain/storage.js";
-import { buildConcepts, EMPTY_CONCEPTS, estimateConceptCost, type BuiltConcepts } from "../concepts/buildConcepts.js";
+import {
+  EMPTY_CONCEPTS,
+  estimateConceptCost,
+  judgeConceptCandidates,
+  reviewAndFinishConcepts,
+  type BuiltConcepts,
+  type JudgedConcepts,
+} from "../concepts/buildConcepts.js";
 import type { PipelineContext } from "../context.js";
 import type { GmailProfile } from "../gmail/client.js";
 import { readCachedHeaderRows } from "../ingest/cache.js";
@@ -68,6 +77,9 @@ class BrainBuild {
   private published: GenerationMetadata | undefined;
   /** Started in the full-read phase, awaited by the inbox phases; undefined under `--no-skim`. */
   private fastHeaders: Promise<{ value: MessageHeader[] } | { error: unknown }> | undefined;
+  /** Started by the inbox phases, awaited beside the judge; undefined under `--no-skim`. */
+  private bodyTask: Promise<{ value: EmailThread[] } | { error: unknown }> | undefined;
+  private bodyIds: string[] = [];
 
   constructor(
     private readonly client: GmailReader,
@@ -83,7 +95,7 @@ class BrainBuild {
   async run(): Promise<GenerationMetadata> {
     await this.runFullReadPhase();
     await this.runInboxPhases();
-    await this.runConceptPhase();
+    await this.runBodyAndConceptPhases();
     if (!this.published) throw new Error("Unreachable: the final phase always publishes");
     return this.published;
   }
@@ -204,7 +216,7 @@ class BrainBuild {
     await this.publishPhase("full-read", `${this.threads.length} threads you took part in.`);
   }
 
-  /** The header-only tiers: a fast sample, then the complete index, then raw bodies for the rest. */
+  /** The inbox tiers: a fast header sample, then the complete index, which starts the body fetch. */
   private async runInboxPhases(): Promise<void> {
     if (!this.fastHeaders) return;
     const result = await this.fastHeaders;
@@ -224,29 +236,62 @@ class BrainBuild {
       `${this.skim.length} skim-tier threads indexed, ${fresh.length} more promoted threads read in full.`,
     );
 
-    // Bodies last and Gmail-only: nothing waits on them, and needle questions get full text.
+    // Bodies are Gmail-only; the backfill already cached most of them, so only unread skim threads cost.
     const known = new Set(this.threads.map((thread) => thread.id));
-    const bodyIds = [...new Set(this.skim.map((row) => row.threadId))].filter((id) => !known.has(id));
-    const fetchedBodies = await fetchThreadsById(this.client, bodyIds, this.context, "bodies");
-    this.bodies = fetchedBodies.map((thread) => localizeThread(thread, this.timezone));
-    await this.publishPhase(
-      "body-evidence",
-      `raw bodies stored for ${this.bodies.length} of ${bodyIds.length} remaining inbox threads.`,
+    this.bodyIds = [...new Set(this.skim.map((row) => row.threadId))].filter((id) => !known.has(id));
+    this.bodyTask = settle(
+      fetchThreadsById(this.client, this.bodyIds, this.context, "bodies").then((fetched) =>
+        fetched.map((thread) => localizeThread(thread, this.timezone)),
+      ),
     );
   }
 
-  /** Projects and interests, synthesized last so receipts found in body-only mail can feed them. */
-  private async runConceptPhase(): Promise<void> {
-    if (this.options.noSynthesize) return;
-    const { context, options, userEmail } = this;
-    const estimate = estimateConceptCost(this.extractions, this.threads, userEmail, context);
-    checkBudgetBeforeStage("synthesis", estimate, options.budget, context);
-    const loops = listOpenLoops(this.registry().listEntities(), context.today);
-    this.concepts = await buildConcepts(this.extractions, this.threads, userEmail, context, this.bodies, loops);
-    await this.publishPhase(
-      "concepts",
-      `${this.concepts.projects.length} projects, ${this.concepts.interests.length} interests.`,
+  /**
+   * The budget check is the task's first statement, so it still runs before the first paid concept call.
+   */
+  private startJudge(): Promise<{ value: JudgedConcepts } | { error: unknown }> | undefined {
+    if (this.options.noSynthesize) return undefined;
+    const { context, extractions, options, threads, userEmail } = this;
+    return settle(
+      (async () => {
+        const estimate = estimateConceptCost(extractions, threads, userEmail, context);
+        checkBudgetBeforeStage("synthesis", estimate, options.budget, context);
+        return judgeConceptCandidates(extractions, threads, userEmail, context);
+      })(),
     );
+  }
+
+  /**
+   * The bodies are Gmail-bound and the judge is model-bound, so they overlap; only the review that follows
+   * needs the recurring merchants parsed from every stored body, which is why concepts still finish last.
+   */
+  private async runBodyAndConceptPhases(): Promise<void> {
+    const judgeTask = this.startJudge();
+    // Both are awaited before either failure is raised, so neither can end as an unhandled rejection.
+    const bodyResult = this.bodyTask ? await this.bodyTask : undefined;
+    const judgeResult = judgeTask ? await judgeTask : undefined;
+    if (bodyResult) {
+      if ("error" in bodyResult) throw bodyResult.error;
+      this.bodies = bodyResult.value;
+      await this.publishPhase(
+        "body-evidence",
+        `raw bodies stored for ${this.bodies.length} of ${this.bodyIds.length} remaining inbox threads` +
+          `${judgeTask ? ", concepts judged alongside" : ""}.`,
+      );
+    }
+    if (judgeResult) {
+      if ("error" in judgeResult) throw judgeResult.error;
+      const { context, extractions, threads, userEmail } = this;
+      const loops = listOpenLoops(this.registry().listEntities(), context.today);
+      this.concepts = await reviewAndFinishConcepts(judgeResult.value, extractions, threads, userEmail, context, {
+        bodies: this.bodies,
+        loops,
+      });
+      await this.publishPhase(
+        "concepts",
+        `${this.concepts.projects.length} projects, ${this.concepts.interests.length} interests.`,
+      );
+    }
   }
 }
 
