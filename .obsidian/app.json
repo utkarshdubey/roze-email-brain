@@ -1,0 +1,9 @@
+{
+  "promptDelete": false,
+  "showFrontmatter": true,
+  "newFileLocation": "folder",
+  "newFileFolderPath": "docs",
+  "attachmentFolderPath": "docs/attachments",
+  "useMarkdownLinks": false,
+  "alwaysUpdateLinks": true
+}
