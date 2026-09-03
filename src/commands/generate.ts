@@ -6,7 +6,7 @@ import { resolveBrainPaths } from "../brain/storage.js";
 import { createPipelineLog, type PipelineContext } from "../context.js";
 import { buildBrain, type GenerationMetadata } from "../generation/buildBrain.js";
 import type { GenerationOptions } from "../generation/phases.js";
-import { loadSavedCredentials } from "../gmail/auth.js";
+import { createTokenSource } from "../gmail/auth.js";
 import { GmailClient } from "../gmail/client.js";
 import type { GmailReader } from "../ingest/mail.js";
 import { cachedModelCall, resetModelState, usageLedger, type CallModel } from "../llm/models.js";
@@ -82,7 +82,7 @@ export async function runGenerateCommand(
   const ui = createUi({ write, writeError });
   const callModel: CallModel =
     overrides.callModel ?? ((request) => cachedModelCall({ ...request, budget: options.budget }));
-  const client = overrides.client ?? new GmailClient(await loadSavedCredentials());
+  const client = overrides.client ?? new GmailClient(createTokenSource());
   const profile = await client.getProfile();
   const context: PipelineContext = {
     paths: resolveBrainPaths(overrides.root, profile.emailAddress),

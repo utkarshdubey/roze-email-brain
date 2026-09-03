@@ -13,7 +13,8 @@ Reference mailbox (2,792 extracted + 19,994 body-only threads): cold model build
 promotion ≈ 0.04, tags ≈ 0.03, judge ≈ 0.6–0.8, review ≈ 0.15); unchanged rebuild $0; a prompt ≈ 6¢.
 
 Gmail time: 250 quota units per second per user is Google's ceiling (header 5, thread 10, list 5),
-paced at 85%; every skim thread is read in full exactly once, and the body download overlaps the concept
+paced at 85%; every skim thread is read exactly once (a single-message thread, 97% of the inbox, as one
+5-unit message read), and the body download overlaps the concept
 judge, so the critical path is phases 1–3 plus the longer of the bodies and the judge, plus the review.
 
 What repays what: rendered thread text or the extraction prompt → extraction and everything after; the tag

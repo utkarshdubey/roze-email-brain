@@ -7,6 +7,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  createTokenSource,
   GMAIL_SCOPE,
   GOOGLE_TOKEN_URI,
   loadSavedCredentials,
@@ -90,6 +91,62 @@ test("client pages ids and parses full threads and metadata", async () => {
   );
   assert.equal((await client.fetchMessageHeaders("m1")).fromEmail, "jane@example.com");
   assert.equal(urls[1]?.searchParams.get("pageToken"), "next");
+});
+
+test("a 401 mid-build renews the token once through the source and repeats the request", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "roze-token-source-")),
+    path = join(directory, ".token.json");
+  try {
+    writeFileSync(path, JSON.stringify({ ...credentials, expiry: "2030-01-01T00:00:00Z" }));
+    const bearers: string[] = [];
+    let refreshes = 0;
+    const fetcher: FetchLike = async (input, init) => {
+      if (String(input) === GOOGLE_TOKEN_URI) {
+        refreshes += 1;
+        return Response.json({ access_token: `fresh-${refreshes}`, expires_in: 3600 });
+      }
+      const bearer = String(new Headers(init?.headers).get("authorization"));
+      bearers.push(bearer);
+      if (bearer === "Bearer token") return new Response("{}", { status: 401, statusText: "Unauthorized" });
+      return Response.json({ emailAddress: "me@example.com", historyId: "1" });
+    };
+    const client = new GmailClient(createTokenSource({ tokenPath: path, fetch: fetcher }), {
+      fetch: fetcher,
+      sleep: async () => undefined,
+    });
+    assert.equal((await client.getProfile()).emailAddress, "me@example.com");
+    assert.deepEqual(bearers, ["Bearer token", "Bearer fresh-1"], "the stale token is spent once, then renewed");
+    assert.match(readFileSync(path, "utf8"), /"token": "fresh-1"/u, "the renewed token is saved for the next command");
+    // Sixteen workers crossing the boundary together buy one renewal, and a renewed token is spent as-is.
+    await Promise.all([client.getProfile(), client.getProfile(), client.getProfile()]);
+    assert.equal(refreshes, 1);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("message listings carry thread ids and a single-message thread reads as one message", async () => {
+  const urls: URL[] = [];
+  const fetcher: FetchLike = async (input) => {
+    const url = new URL(String(input));
+    urls.push(url);
+    if (url.pathname.endsWith("/messages"))
+      return Response.json({ messages: [{ id: "m1", threadId: "thread-1" }, { id: "m2", threadId: "thread-2" }] });
+    if (url.pathname.endsWith("/messages/m1")) return Response.json(rawMessage());
+    throw new Error(`unexpected ${url}`);
+  };
+  const client = new GmailClient("token", { fetch: fetcher, sleep: async () => undefined });
+  assert.deepEqual(await client.listMessages("newer_than:2y"), [
+    { id: "m1", threadId: "thread-1" },
+    { id: "m2", threadId: "thread-2" },
+  ]);
+  const thread = await client.fetchSingleMessageThread("m1", "thread-1");
+  assert.equal(thread.id, "thread-1");
+  assert.deepEqual(
+    thread.messages.map((row) => row.id),
+    ["m1"],
+  );
+  assert.equal(urls.at(-1)?.searchParams.get("format"), "full");
 });
 
 test("quota 403 is retried with seconds of backoff and every request is throttled", async () => {

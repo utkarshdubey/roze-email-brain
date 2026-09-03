@@ -144,6 +144,19 @@ The backfill reads threads, not headers. A skim thread used to be paid for twice
 deriving the index row from its first message costs 10 instead of 15 and leaves the body phase with a
 cache hit. The fast pass stays header-only: its job is to surface people within minutes.
 
+Single-message threads are read as one message. Listing the window's messages instead of its threads
+costs the same five units per page and also says how many messages each thread has; on the reference
+mailbox 21,058 of 21,616 inbox threads are one message, and `messages.get` (5 units) returns exactly
+what `threads.get` (10) would for them. The body phase, which is most of a cold build's Gmail time,
+roughly halves. A message the listing could not see (older than the window, or in an excluded
+category) is not fetched by a single-message read; `read_email` still fetches such a thread whole.
+
+Access tokens live an hour and a build can run longer. The Gmail client asks a token source before
+every request; the source renews the token a few minutes before its saved expiry, shares one renewal
+among the workers that reach the boundary together, renews once more if Gmail still answers 401, and
+saves the result for the next command. A failed renewal surfaces as "run `roze auth`", not as a
+request that failed six times.
+
 Gmail work and model work overlap wherever nothing depends on both: the first header skim overlaps
 full-read extraction, and body fetching overlaps concept judging, since only the review that follows
 needs the recurring merchants parsed from every stored body. `buildConcepts` is split at that seam into

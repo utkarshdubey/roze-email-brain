@@ -3,7 +3,7 @@
 // full read per uncovered thread in the backfill. Both are resumable and deterministically ordered.
 
 import { mapAtLimitedConcurrency, type PipelineContext } from "../context.js";
-import { isExhaustedQuota, isSkippableGmailItem, type GmailProfile } from "../gmail/client.js";
+import { isExhaustedQuota, isSkippableGmailItem, type GmailProfile, type ListedMessage } from "../gmail/client.js";
 import { cleanSnippet } from "../shared/text.js";
 import { collapseHeadersToThreads, looksLikeAHuman, type EmailThread, type MessageHeader } from "../types.js";
 import {
@@ -49,6 +49,30 @@ const WORKERS = 16;
 interface ThreadIngestClient {
   listThreadIds(query: string, limit?: number): Promise<string[]>;
   fetchThread(id: string): Promise<EmailThread>;
+  /** Optional: a client that can tell single-message threads apart lets them be read at half the units. */
+  listMessages?(query: string, limit?: number): Promise<ListedMessage[]>;
+  fetchSingleMessageThread?(messageId: string, threadId: string): Promise<EmailThread>;
+}
+/** The two-year skim as Gmail lists it: every thread and the message ids the query matched inside it. */
+export type SkimListing = ReadonlyMap<string, readonly string[]>;
+/**
+ * One listing pass (five units per 500 messages) instead of a thread listing, because it also says how many
+ * messages each thread has: 97% of inbox threads are a single message, and those are read as one message (5
+ * units) rather than as a thread (10). A client without message listing yields threads of unknown size, which
+ * are always read in full. A message outside the query (older than the window, in an excluded category) is not
+ * fetched with a single-message read; `read_email` still fetches such a thread whole.
+ */
+export async function listSkimThreads(client: ThreadIngestClient): Promise<SkimListing> {
+  const listing = new Map<string, string[]>();
+  if (!client.listMessages) {
+    for (const id of await client.listThreadIds(SKIM_QUERY, 100_000)) listing.set(id, []);
+    return listing;
+  }
+  for (const row of await client.listMessages(SKIM_QUERY, 100_000)) {
+    if (!row.threadId) continue;
+    listing.set(row.threadId, [...(listing.get(row.threadId) ?? []), row.id]);
+  }
+  return listing;
 }
 interface HeaderIngestClient {
   listMessageIds(query: string, limit?: number): Promise<string[]>;
@@ -84,6 +108,7 @@ export async function fetchThreadsById(
   ids: readonly string[],
   context: PipelineContext,
   label = "threads",
+  listing?: SkimListing,
 ): Promise<EmailThread[]> {
   const unique = [...new Set(ids)];
   const found = new Map<string, EmailThread>();
@@ -101,8 +126,12 @@ export async function fetchThreadsById(
     WORKERS,
     async (id) => {
       let thread: EmailThread;
+      const messageIds = listing?.get(id);
       try {
-        thread = await client.fetchThread(id);
+        thread =
+          messageIds?.length === 1 && client.fetchSingleMessageThread
+            ? await client.fetchSingleMessageThread(messageIds[0]!, id)
+            : await client.fetchThread(id);
       } catch (error) {
         // A chat conversation, vanished thread, or exhausted quota must not abort a build; the thread is
         // left out and the next generate resumes it from the cache boundary.
@@ -215,15 +244,16 @@ export function headerRowFromThread(thread: EmailThread): MessageHeader | undefi
  * skip) so people surface in minutes; "complete" lists everything, so promotion can still reach the
  * automated senders that matter.
  *
- * The backfill lists threads rather than messages and reads each uncovered thread in full (10 units)
- * instead of one metadata header (5): the body phase then finds it already in the thread cache, so a skim
- * thread costs one Gmail read instead of two. The fast pass stays header-only — its job is to surface
- * people within minutes, and a header is half the units and a fraction of the bytes.
+ * The backfill reads each uncovered thread once in full instead of buying a metadata header first: the body
+ * phase then finds it already in the thread cache, so a skim thread costs one Gmail read instead of two, and
+ * a single-message thread costs one message read (see `listSkimThreads`). The fast pass stays header-only —
+ * its job is to surface people within minutes, and a header is half the units and a fraction of the bytes.
  */
 export async function fetchRecentInboxHeaders(
   client: SkimIngestClient,
   context: PipelineContext,
   mode: "fast" | "complete" = "fast",
+  listing?: SkimListing,
 ): Promise<MessageHeader[]> {
   // A cached row without a snippet is refetched; a metadata read is free and the index needs the snippet.
   const byId = new Map(
@@ -238,13 +268,14 @@ export async function fetchRecentInboxHeaders(
     }
   };
   /** Threads the fast pass already indexed keep their rows; the rest are read once, in full. */
-  const backfillThreads = async (ids: readonly string[], label: string): Promise<void> => {
+  const backfillThreads = async (skim: SkimListing, label: string): Promise<void> => {
     const indexed = new Set([...byId.values()].map((row) => row.threadId));
     const fetched = await fetchThreadsById(
       client,
-      ids.filter((id) => !indexed.has(id)),
+      [...skim.keys()].filter((id) => !indexed.has(id)),
       context,
       label,
+      skim,
     );
     // Threads are cached one file at a time by the fetch, so an interrupted backfill resumes for free and
     // only the derived rows are rewritten.
@@ -263,7 +294,7 @@ export async function fetchRecentInboxHeaders(
     );
     await fetchUncached(await client.listMessageIds(buildSkimQuery(excluded), 100_000), "skim");
   } else {
-    await backfillThreads(await client.listThreadIds(SKIM_QUERY, 100_000), "skim backfill");
+    await backfillThreads(listing ?? (await listSkimThreads(client)), "skim backfill");
   }
   return collapseHeadersToThreads([...byId.values()]).sort(
     (a, b) => b.timestamp - a.timestamp || a.threadId.localeCompare(b.threadId),

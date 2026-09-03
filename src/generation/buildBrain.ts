@@ -31,6 +31,7 @@ import {
   fetchRecentInboxHeaders,
   fetchThreadsById,
   listParticipatedThreadIds,
+  listSkimThreads,
   sortThreads,
   type GmailReader,
 } from "../ingest/mail.js";
@@ -228,7 +229,9 @@ class BrainBuild {
       `${result.value.length} skim-tier threads, ${fresh.length} promoted threads read in full.`,
     );
 
-    const complete = await fetchRecentInboxHeaders(this.client, this.context, "complete");
+    // One message listing serves both the backfill and the body fetch: it says which threads are one message.
+    const listing = await listSkimThreads(this.client);
+    const complete = await fetchRecentInboxHeaders(this.client, this.context, "complete", listing);
     this.skim = complete.map((row) => localizeHeader(row, this.timezone));
     fresh = await this.promote();
     await this.publishPhase(
@@ -240,7 +243,7 @@ class BrainBuild {
     const known = new Set(this.threads.map((thread) => thread.id));
     this.bodyIds = [...new Set(this.skim.map((row) => row.threadId))].filter((id) => !known.has(id));
     this.bodyTask = settle(
-      fetchThreadsById(this.client, this.bodyIds, this.context, "bodies").then((fetched) =>
+      fetchThreadsById(this.client, this.bodyIds, this.context, "bodies", listing).then((fetched) =>
         fetched.map((thread) => localizeThread(thread, this.timezone)),
       ),
     );

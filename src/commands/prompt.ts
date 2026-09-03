@@ -3,7 +3,7 @@
 // pipe, a file, `--quiet`, or NO_COLOR/ROZE_PLAIN gets the text verbatim plus the one bracketed line.
 import { parseArgs } from "node:util";
 
-import { loadSavedCredentials } from "../gmail/auth.js";
+import { createTokenSource } from "../gmail/auth.js";
 import { GmailClient } from "../gmail/client.js";
 import { usageLedger } from "../llm/models.js";
 import { answerOneQuestion } from "../query/answerAgent.js";
@@ -48,7 +48,7 @@ function createLiveFetch(): FetchThread | undefined {
   if (!readJson(".token.json")) return undefined;
   let client: Promise<GmailClient> | undefined;
   return async (id) => {
-    client ??= loadSavedCredentials().then((credentials) => new GmailClient(credentials));
+    client ??= Promise.resolve(new GmailClient(createTokenSource()));
     return (await client).fetchThread(id);
   };
 }

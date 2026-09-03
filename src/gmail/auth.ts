@@ -121,6 +121,56 @@ export async function loadSavedCredentials(options: CredentialOptions = {}): Pro
   return refreshed;
 }
 
+/** What the client spends: a token that is renewed a little early, and again after Gmail answers 401. */
+export interface AccessTokenSource {
+  token(): Promise<string>;
+  /** The next `token()` refreshes even though the saved expiry still looks fine. */
+  invalidate(): void;
+}
+
+/**
+ * A build outlives a Google access token (sixty minutes, not extendable) several times over, so the client
+ * asks this source before every request instead of holding one token for its whole life. A renewal is shared
+ * across the workers that hit the boundary together, and the renewed token is saved for the next command.
+ */
+export function createTokenSource(options: CredentialOptions = {}): AccessTokenSource {
+  let current: GoogleCredentials | undefined;
+  let stale = false;
+  let renewal: Promise<GoogleCredentials> | undefined;
+  const renew = (): Promise<GoogleCredentials> =>
+    (renewal ??= (async () => {
+      try {
+        if (stale && current) {
+          const refreshed = await refreshAccessToken(current, options);
+          saveCredentials(resolveTokenPath(options.tokenPath), refreshed);
+          return refreshed;
+        }
+        // Re-reading the file also picks up a token another roze process renewed meanwhile.
+        return await loadSavedCredentials(options);
+      } finally {
+        renewal = undefined;
+      }
+    })());
+  return {
+    async token() {
+      const now = options.now?.() ?? Date.now();
+      if (current && !stale && Date.parse(current.expiry) - REFRESH_EARLY_MS > now) return current.token;
+      current = await renew();
+      stale = false;
+      return current.token;
+    },
+    invalidate() {
+      stale = true;
+    },
+  };
+}
+
+/** Sign-in and tests spend a token as-is; nothing renews it. */
+export const staticTokenSource = (token: string): AccessTokenSource => ({
+  token: async () => token,
+  invalidate: () => undefined,
+});
+
 /** `cmd /c start` splits a URL at every `&`, dropping response_type and breaking sign-in on Windows. */
 function browserCommand(url: string): { command: string; args: string[] } {
   if (process.platform === "darwin") return { command: "open", args: [url] };

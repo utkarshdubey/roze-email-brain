@@ -195,6 +195,11 @@ function scoreLine(path: string, lower: string, terms: readonly string[], phrase
   );
 }
 
+/**
+ * Every matching line is scored first; a file's share is taken after ranking, so a year list with many
+ * matches keeps its best rows rather than the first ten in file order (which, newest first, silently
+ * dropped every older thread).
+ */
 function collectHits(
   files: ReadonlyArray<[string, string]>,
   wanted: (text: string) => boolean,
@@ -203,8 +208,6 @@ function collectHits(
 ): Hit[] {
   const hits: Hit[] = [];
   for (const [path, resolved] of files) {
-    const perFile = hitsPerFile(path);
-    let inFile = 0;
     for (const [index, source] of linesOf(readFileSync(resolved, "utf8")).entries()) {
       const lower = source.toLowerCase();
       if (!wanted(lower)) continue;
@@ -214,14 +217,19 @@ function collectHits(
         line: index + 1,
         text: cleanText(source, 500) || "(blank line)",
       });
-      if (++inFile === perFile) break;
     }
     if (wanted(path.toLowerCase())) {
       hits.push({ score: 55, path, line: 0, text: "(filename match)" });
     }
   }
   hits.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path) || a.line - b.line);
-  return hits;
+  const taken = new Map<string, number>();
+  return hits.filter((hit) => {
+    if (hit.line === 0) return true;
+    const used = taken.get(hit.path) ?? 0;
+    taken.set(hit.path, used + 1);
+    return used < hitsPerFile(hit.path);
+  });
 }
 
 function quoteQuery(query: string): string {

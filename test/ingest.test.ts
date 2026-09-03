@@ -12,6 +12,7 @@ import {
   fetchThreadsById,
   learnAutomatedDomains,
   listParticipatedThreadIds,
+  listSkimThreads,
 } from "../src/ingest/mail.js";
 import { decideWhatToReadPerSender, estimatePromotionCost } from "../src/ingest/promote.js";
 import { GmailRequestError } from "../src/gmail/client.js";
@@ -223,6 +224,72 @@ test("the skim learns bulk domains from a sample and excludes them from the seco
     for (const term of AUTOMATED_SENDER_TERMS)
       assert.equal(looksLikeAHuman(header(`${term}@shop.example`, "t", 1)), false, term);
     assert.equal(buildSkimQuery(["a.example"]).split(" -from:").length, AUTOMATED_SENDER_TERMS.length + 2);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the complete backfill reads single-message threads as one message and the rest in full", async () => {
+  const root = mkdtempSync(join(tmpdir(), "roze-ingest-single-"));
+  try {
+    const reads: string[] = [];
+    const client = {
+      async listMessageIds() {
+        return [];
+      },
+      async fetchMessageHeaders(id: string) {
+        return header("alice@example.com", id, 1, { id });
+      },
+      async listThreadIds() {
+        return ["t1", "t2"];
+      },
+      async listMessages() {
+        return [
+          { id: "m1", threadId: "t1" },
+          { id: "m2a", threadId: "t2" },
+          { id: "m2b", threadId: "t2" },
+        ];
+      },
+      async fetchThread(id: string) {
+        reads.push(`thread ${id}`);
+        return {
+          id,
+          messages: [message(`${id}-a`, "2026-01-01"), message(`${id}-b`, "2026-01-02")].map((row) => ({
+            ...row,
+            threadId: id,
+          })),
+        };
+      },
+      async fetchSingleMessageThread(messageId: string, threadId: string) {
+        reads.push(`message ${messageId}`);
+        return { id: threadId, messages: [{ ...message(messageId, "2026-01-03"), threadId }] };
+      },
+    };
+    const ctx = context(root, {});
+    const listing = await listSkimThreads(client);
+    assert.deepEqual([...listing], [
+      ["t1", ["m1"]],
+      ["t2", ["m2a", "m2b"]],
+    ]);
+    const rows = await fetchRecentInboxHeaders(client, ctx, "complete", listing);
+    assert.deepEqual(reads.sort(), ["message m1", "thread t2"]);
+    assert.deepEqual(
+      rows.map((row) => [row.threadId, row.count]).sort(),
+      [
+        ["t1", 1],
+        ["t2", 2],
+      ],
+    );
+    // The body fetch finds both in the cache, and a client without message listing reads everything in full.
+    await fetchThreadsById(client, ["t1", "t2"], ctx, "bodies", listing);
+    assert.equal(reads.length, 2);
+    const { listMessages, fetchSingleMessageThread, ...plain } = client;
+    void listMessages;
+    void fetchSingleMessageThread;
+    assert.deepEqual([...(await listSkimThreads(plain))], [
+      ["t1", []],
+      ["t2", []],
+    ]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -9,7 +9,8 @@ and a plain-file output.
 `src/cli.ts` dispatches exactly `auth`, `generate`, and `prompt`; each lives in `src/commands/`.
 
 - `auth` performs loopback Google OAuth with `gmail.readonly`, verifies the profile, and saves an
-  owner-only token.
+  owner-only token. Later commands spend it through a token source that renews it a few minutes
+  before expiry and once more after a 401, so a build longer than an access token's hour survives.
 - `generate` reads Gmail, derives memory, renders a complete staging tree, then swaps it into place.
 - `prompt <query>` answers once through three read-only tools and audits the resulting citations.
 
@@ -40,10 +41,11 @@ The command publishes these phases in order:
 2. `fast-inbox`: a newest-first two-year header sample excludes obvious automated senders and learns
    consistently automated bulk domains. A model chooses useful senders to promote.
 3. `complete-inbox`: every eligible inbox thread is indexed, including automated senders; newly
-   promoted threads are fetched and extracted. The backfill lists threads and reads each thread the
-   fast pass never covered in full (10 quota units) rather than one metadata header (5), so the body
-   phase finds it already cached and no skim thread is ever fetched twice. Its index row is derived
-   from the thread's first message, in the same fields a metadata read would have produced.
+   promoted threads are fetched and extracted. The backfill lists the window's messages once (which
+   says how many each thread has) and reads each thread the fast pass never covered: a single-message
+   thread as one message (5 quota units), a longer one in full (10), never a metadata header first,
+   so the body phase finds it already cached and no skim thread is ever fetched twice. Its index row
+   is derived from the thread's first message, in the same fields a metadata read would have produced.
 4. `body-evidence`: raw bodies for every remaining indexed thread are fetched and stored, but never
    extracted. This costs Gmail time, not model tokens.
 5. `concepts`: cards, tags, clusters, judge, and the first gates run while phase 4 downloads bodies;

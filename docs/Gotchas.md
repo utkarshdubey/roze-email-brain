@@ -20,6 +20,13 @@ tags: [operations]
   cursor stands, and phase 1 overlaps the participated-thread fetch with the inbox skim. The invariant:
   [[One status board owns the terminal]] — in rich mode every write goes through the board, and no second
   cursor-owning widget (bar, spinner, ad-hoc `\r` line) may exist while a stage is live.
+- A build longer than a Google access token (60 min, not extendable) used to die on an unretried 401: the
+  client held one token string for its whole life. It now asks a token source before every request, which
+  renews early, once more on 401, and saves the result. An OAuth app in Testing status still expires refresh
+  tokens after 7 days, so `roze auth` is needed weekly until the app is published.
+- `search_memory` used to keep the first ten matching rows of a year list in file order (newest first) and
+  rank afterwards, so any term with more than ten hits in a year silently lost its older threads. The share is
+  now taken after ranking.
 - Days must be the user's days: automated senders stamp UTC; the offset timeline from sent mail fixes it.
 - `resultSizeEstimate` caps at 201; count by paging. Substring entity matching filed "Rox" under "X": match
   whole words, names ≥ 3 chars.

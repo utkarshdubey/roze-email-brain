@@ -123,6 +123,21 @@ test("search is literal and line reads use one-based inclusive ranges", () => {
       /threads-2026\.md/u,
       "newer rows rank first at equal relevance",
     );
+    // Twelve matching rows, newest first, and the exact phrase only on the oldest: the per-file share is
+    // taken after ranking, so the old row is the first result instead of being dropped unread.
+    writeFileSync(
+      join(root, "threads", "threads-2020.md"),
+      [
+        ...Array.from(
+          { length: 11 },
+          (_, index) => `- 2020-12-${String(20 - index).padStart(2, "0")} Rox vendor invoice noted. [t:b${index} 2020-12-01]`,
+        ),
+        "- 2020-01-05 Vendor sent the Rox onboarding invoice, paid. [t:b99 2020-01-05]",
+      ].join("\n") + "\n",
+    );
+    const needle = searchMemory(root, "Rox onboarding invoice", "thread_summaries", "any_term", 5);
+    assert.match(needle.split("\n")[1] ?? "", /threads-2020\.md:12/u, "the best row wins, not the first ten");
+    assert.match(needle, /^5 of \d+ matches/u);
     mkdirSync(join(root, "evidence"), { recursive: true });
     writeFileSync(
       join(root, "evidence", "inbox-2026.md"),

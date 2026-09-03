@@ -4,7 +4,7 @@
 import { z } from "zod";
 import { cleanSnippet } from "../shared/text.js";
 import type { EmailThread, MessageHeader } from "../types.js";
-import type { GoogleCredentials } from "./auth.js";
+import { staticTokenSource, type AccessTokenSource, type GoogleCredentials } from "./auth.js";
 import { describeHttpFailure, type FetchLike } from "./http.js";
 import { gmailMessageSchema, parseMessage } from "./messages.js";
 
@@ -32,9 +32,14 @@ const profileSchema = z.object({
 });
 const pageSchema = z.object({
   threads: z.array(z.object({ id: z.string().min(1) })).optional(),
-  messages: z.array(z.object({ id: z.string().min(1) })).optional(),
+  messages: z.array(z.object({ id: z.string().min(1), threadId: z.string().optional() })).optional(),
   nextPageToken: z.string().optional(),
 });
+/** One listed message: its thread is what the skim backfill and body fetch group by. */
+export interface ListedMessage {
+  id: string;
+  threadId: string;
+}
 const threadSchema = z.object({ messages: z.array(gmailMessageSchema).default([]) });
 export type GmailProfile = z.output<typeof profileSchema>;
 
@@ -77,7 +82,7 @@ function retryDelayMs(response: Response, attempt: number): number {
 }
 
 export class GmailClient {
-  readonly #token: string;
+  readonly #tokens: AccessTokenSource;
   readonly #fetch: FetchLike;
   readonly #sleep: (milliseconds: number) => Promise<void>;
   /** Earliest the next request may leave, advanced by each request's own quota cost. */
@@ -85,9 +90,17 @@ export class GmailClient {
   /** Set by a quota answer; every worker on this client holds off until the window has reset. */
   #pausedUntil = 0;
 
-  constructor(credentials: GoogleCredentials | string, options: GmailClientOptions = {}) {
-    this.#token = typeof credentials === "string" ? credentials : credentials.token;
-    if (!this.#token) throw new Error("GmailClient requires a Google access token");
+  /** A token source renews mid-build; a credentials object or bare string is spent as-is (sign-in, tests). */
+  constructor(credentials: AccessTokenSource | GoogleCredentials | string, options: GmailClientOptions = {}) {
+    if (typeof credentials === "string") {
+      if (!credentials) throw new Error("GmailClient requires a Google access token");
+      this.#tokens = staticTokenSource(credentials);
+    } else if (typeof credentials.token === "function") {
+      this.#tokens = credentials as AccessTokenSource;
+    } else {
+      if (!credentials.token) throw new Error("GmailClient requires a Google access token");
+      this.#tokens = staticTokenSource(credentials.token as string);
+    }
     this.#fetch = options.fetch ?? globalThis.fetch;
     this.#sleep = options.sleep ?? wait;
   }
@@ -114,11 +127,15 @@ export class GmailClient {
     if (parameters) {
       url.search = parameters.toString();
     }
+    let renewedToken = false;
     for (let attempt = 0; attempt < QUOTA_ATTEMPTS; attempt += 1) {
+      // Outside the transport retry: a failed renewal ("run roze auth") must surface as itself, not as a
+      // request that failed six times.
+      const token = await this.#tokens.token();
       let response: Response;
       try {
         await this.#takeRequestSlot(units);
-        response = await this.#fetch(url, { headers: { authorization: `Bearer ${this.#token}` } });
+        response = await this.#fetch(url, { headers: { authorization: `Bearer ${token}` } });
       } catch (error) {
         // A transport failure carries no status, so it spends the shorter network budget.
         if (attempt + 1 >= ATTEMPTS)
@@ -127,6 +144,12 @@ export class GmailClient {
         continue;
       }
       if (response.ok) return response;
+      if (response.status === 401 && !renewedToken) {
+        // The access token expired while this build was running: renew once and repeat the request.
+        renewedToken = true;
+        this.#tokens.invalidate();
+        continue;
+      }
       const { detail, message } = await describeHttpFailure(response, "Gmail request");
       const quota = response.status === 403 && QUOTA_REASONS.some((reason) => detail.includes(reason));
       const retryable = quota || RETRYABLE.has(response.status);
@@ -160,33 +183,59 @@ export class GmailClient {
   }
 
   /** A repeated pageToken would loop forever, so it is refused. */
-  async #listEveryId(resource: "threads" | "messages", query: string, limit: number): Promise<string[]> {
+  async #listEvery(resource: "threads" | "messages", query: string, limit: number): Promise<ListedMessage[]> {
     if (!Number.isInteger(limit) || limit < 0)
       throw new RangeError("Gmail listing limit must be a non-negative integer");
-    const ids: string[] = [];
+    const rows: ListedMessage[] = [];
     const seen = new Set<string>();
     let token: string | undefined;
-    while (ids.length < limit) {
-      const parameters = new URLSearchParams({ q: query, maxResults: String(Math.min(500, limit - ids.length)) });
+    while (rows.length < limit) {
+      const parameters = new URLSearchParams({ q: query, maxResults: String(Math.min(500, limit - rows.length)) });
       if (token) {
         parameters.set("pageToken", token);
       }
       const page = await this.#read(resource, UNITS.list, pageSchema, parameters);
-      ids.push(...(page[resource] ?? []).map((row) => row.id).slice(0, limit - ids.length));
+      const listed: ListedMessage[] =
+        resource === "threads"
+          ? (page.threads ?? []).map((row) => ({ id: row.id, threadId: row.id }))
+          : (page.messages ?? []).map((row) => ({ id: row.id, threadId: row.threadId ?? "" }));
+      rows.push(...listed.slice(0, limit - rows.length));
       if (!page.nextPageToken) break;
       if (seen.has(page.nextPageToken)) throw new Error("Gmail repeated a pageToken while listing mail");
       seen.add(page.nextPageToken);
       token = page.nextPageToken;
     }
-    return ids;
+    return rows;
   }
 
-  listThreadIds(query: string, limit = 100_000): Promise<string[]> {
-    return this.#listEveryId("threads", query, limit);
+  async listThreadIds(query: string, limit = 100_000): Promise<string[]> {
+    return (await this.#listEvery("threads", query, limit)).map((row) => row.id);
   }
 
-  listMessageIds(query: string, limit = 100_000): Promise<string[]> {
-    return this.#listEveryId("messages", query, limit);
+  async listMessageIds(query: string, limit = 100_000): Promise<string[]> {
+    return (await this.#listEvery("messages", query, limit)).map((row) => row.id);
+  }
+
+  /** Message ids with their thread ids, so single-message threads can be told apart before anything is read. */
+  listMessages(query: string, limit = 100_000): Promise<ListedMessage[]> {
+    return this.#listEvery("messages", query, limit);
+  }
+
+  /**
+   * Half the units of a thread read (5, not 10), for a thread the listing showed with exactly one message.
+   * Gmail's own thread id on the message is the thread's id; the caller's id only stands in if it is missing.
+   */
+  async fetchSingleMessageThread(messageId: string, threadId: string): Promise<EmailThread> {
+    if (!messageId) throw new Error("Gmail message id must not be empty");
+    const message = parseMessage(
+      await this.#read(
+        `messages/${encodeURIComponent(messageId)}`,
+        UNITS.message,
+        gmailMessageSchema,
+        new URLSearchParams({ format: "full" }),
+      ),
+    );
+    return { id: message.threadId || threadId, messages: [message] };
   }
 
   async fetchThread(id: string): Promise<EmailThread> {
