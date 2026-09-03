@@ -159,6 +159,7 @@ test("the skim learns bulk domains from a sample and excludes them from the seco
     const client = {
       async listMessageIds(query: string, limit = 100_000) {
         queries.push(query);
+        if (query.startsWith("newer_than:6m")) return ["h1"];
         return Object.keys(rows)
           .filter((id) => !query.includes("bulk.example") || !id.startsWith("a"))
           .slice(0, limit);
@@ -223,7 +224,14 @@ test("the skim learns bulk domains from a sample and excludes them from the seco
     ]);
     for (const term of AUTOMATED_SENDER_TERMS)
       assert.equal(looksLikeAHuman(header(`${term}@shop.example`, "t", 1)), false, term);
-    assert.equal(buildSkimQuery(["a.example"]).split(" -from:").length, AUTOMATED_SENDER_TERMS.length + 2);
+    assert.equal(buildSkimQuery(24, ["a.example"]).split(" -from:").length, AUTOMATED_SENDER_TERMS.length + 2);
+    assert.match(buildSkimQuery(6), /^newer_than:6m /u);
+    assert.throws(() => buildSkimQuery(0), /positive integer/u);
+    assert.deepEqual(
+      (await fetchRecentInboxHeaders(client, context(root, {}), "fast", undefined, 6)).map((row) => row.threadId),
+      ["h1"],
+      "a shorter window does not leak older rows already present in the header cache",
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

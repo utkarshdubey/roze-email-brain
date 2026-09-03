@@ -329,17 +329,23 @@ test("judge batches are hash-bucketed so a changed cluster leaves the other batc
 });
 
 test("bodies still publish before concepts so receipts can feed the interest review", () => {
-  assert.deepEqual(planPhases({ noPromote: false, noSynthesize: false, noSkim: false, publishOnce: false }), [
-    "full-read",
-    "fast-inbox",
-    "complete-inbox",
-    "body-evidence",
-    "concepts",
-  ]);
-  assert.deepEqual(planPhases({ noPromote: false, noSynthesize: false, noSkim: true, publishOnce: false }), [
-    "full-read",
-    "concepts",
-  ]);
+  assert.deepEqual(
+    planPhases({ noPromote: false, noSynthesize: false, noSkim: false, publishOnce: false, recentMonths: 24 }),
+    [
+      "full-read",
+      "fast-inbox",
+      "complete-inbox",
+      "body-evidence",
+      "concepts",
+    ],
+  );
+  assert.deepEqual(
+    planPhases({ noPromote: false, noSynthesize: false, noSkim: true, publishOnce: false, recentMonths: 24 }),
+    [
+      "full-read",
+      "concepts",
+    ],
+  );
 });
 
 test("a domain with more cards than one request holds is judged per year, so recent efforts survive the cap", () => {

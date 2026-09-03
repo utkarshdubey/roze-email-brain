@@ -15,4 +15,6 @@ behind the judge. Since 2026-09-03 the backfill lists messages rather than threa
 page), so it knows which threads are one message and reads those with `messages.get` (5 units) instead of
 `threads.get` (10): 21,058 of 21,616 inbox threads on the reference mailbox, so the body phase roughly halves. A
 message outside the listing (older than the window, an excluded category) is not fetched by that read;
-`read_email` still fetches such a thread whole. Related: [[Pipeline phases]], [[Costs and caching]], [[Bodies before concepts]].
+`read_email` still fetches such a thread whole. Uncached body reads are ordered by sender engagement before
+recency and id, without changing the one-read cache boundary. Related: [[Pipeline phases]], [[Costs and caching]],
+[[Bodies before concepts]], [[Engagement orders inbox reads]].
