@@ -64,3 +64,8 @@ is not decision-grade, and the change is kept only because the body-order signal
 quota "Units per minute per user" is 6,000 (the default is 15,000, adjustable in the console), and the old
 61-second full stop per quota answer ran a cold build at about 4 reads a second (1,818 s to store 4,600
 threads on the second account). The client now learns the cap from a sliding one-minute window.
+
+**Second mailbox (Enron, giron-d), concept rebuild with the same code, $1.04.** 11 → 14 projects and
+25 → 21 interests; 9 of the 54 accepted concepts came from topic clusters. The new projects are work
+efforts the entity and domain families had missed (a deals-book correction, a counterparty setup, a risk
+process improvement, a second trip); nothing in the list is shaped like the reference mailbox.
