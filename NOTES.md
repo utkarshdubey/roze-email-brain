@@ -182,7 +182,9 @@ small Cloudflare Worker (`ROZE_TOKEN_PROXY`, also a default) that holds the secr
 secret, and returns Google's answer unchanged. A desktop client's secret is not truly secret, but handing it
 out in a `.env` is still worse than a proxy that only ever exchanges codes for this one client id. The token
 file records the proxy so refreshes keep working; with a secret present nothing changes and Google is called
-directly.
+directly. The same proxy forwards model calls on a separate OpenAI key with a five-dollar
+hard budget when no key is configured, so a reviewer runs the whole thing with nothing handed over; the
+marker header it requires is not a secret, the budget is the guard.
 
 Gmail work and model work overlap wherever nothing depends on both: the first header skim overlaps
 full-read extraction, and body fetching overlaps concept judging, since only the review that follows

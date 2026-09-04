@@ -79,6 +79,29 @@ test("provider sends the strict Responses shape and parses text, calls, and usag
   }
 });
 
+test("without an OpenAI key the provider calls the proxy with the marker header and no bearer token", async () => {
+  const savedKey = process.env.OPENAI_API_KEY;
+  const savedFetch = globalThis.fetch;
+  // Empty rather than deleted: callProvider re-reads .env, which only fills variables that are unset.
+  process.env.OPENAI_API_KEY = "";
+  process.env.ROZE_OPENAI_PROXY = "https://proxy.example";
+  let seen: { url: string; headers: Record<string, string> } | undefined;
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    seen = { url: String(input), headers: { ...(init?.headers as Record<string, string>) } };
+    return Response.json({ status: "completed", output: [], usage: { input_tokens: 1, output_tokens: 1 } });
+  }) as typeof fetch;
+  try {
+    await callProvider({ model: "gpt-5-nano", instructions: "x", input: "y", effort: "minimal", maxOutputTokens: 16 });
+    assert.equal(seen?.url, "https://proxy.example/openai/v1/responses");
+    assert.equal(seen?.headers["x-roze-client"], "roze-email-brain");
+    assert.equal(seen?.headers.authorization, undefined, "the proxy adds the key; the CLI never sends one");
+  } finally {
+    globalThis.fetch = savedFetch;
+    delete process.env.ROZE_OPENAI_PROXY;
+    if (savedKey !== undefined) process.env.OPENAI_API_KEY = savedKey;
+  }
+});
+
 test("provider retries 429 once but reports permanent 4xx without retrying", async () => {
   const priorKey = process.env.OPENAI_API_KEY;
   const priorFetch = globalThis.fetch;

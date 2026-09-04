@@ -5,6 +5,8 @@ import { loadEnvironmentFile } from "../shared/atomicFiles.js";
 import { cleanText } from "../shared/text.js";
 import type { ModelUsage } from "../types.js";
 
+import { DEFAULT_TOKEN_PROXY } from "../gmail/auth.js";
+
 const API_URL = "https://api.openai.com/v1/responses";
 const MAX_ATTEMPTS = 3;
 
@@ -144,16 +146,22 @@ function describeProviderFailure(response: Response, detail: string, attempt: nu
 export async function callProvider(request: ProviderRequest): Promise<ProviderResult> {
   // Re-read each call: a key added to .env after startup must work without restarting the CLI.
   loadEnvironmentFile();
+  // Without a key the call goes through the author's proxy, which forwards it on a separate, budgeted key:
+  // a reviewer runs the CLI with nothing handed over, and the same ledger still meters every call.
   const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) throw new Error("Missing OPENAI_API_KEY. Add it to .env.");
+  const proxy = process.env.ROZE_OPENAI_PROXY ?? DEFAULT_TOKEN_PROXY;
+  const url = apiKey ? API_URL : `${proxy}/openai/v1/responses`;
+  const headers: Record<string, string> = apiKey
+    ? { authorization: `Bearer ${apiKey}`, "content-type": "application/json" }
+    : { "x-roze-client": "roze-email-brain", "content-type": "application/json" };
   const body = buildRequestBody(request);
   let lastError: unknown;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     let failure: ProviderFailure;
     try {
-      const response = await globalThis.fetch(API_URL, {
+      const response = await globalThis.fetch(url, {
         method: "POST",
-        headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+        headers,
         body: JSON.stringify(body),
       });
       if (response.ok) return readProviderResult(await response.json());

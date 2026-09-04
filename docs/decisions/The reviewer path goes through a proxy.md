@@ -1,8 +1,8 @@
 ---
-title: Token exchange goes through a proxy
+title: The reviewer path goes through a proxy
 tags: [decision]
 ---
-# Token exchange goes through a proxy
+# The reviewer path goes through a proxy
 
 A reviewer runs the CLI with only their own `OPENAI_API_KEY`. The project's public OAuth client id and the
 URL of a small Cloudflare Worker are defaults in `src/gmail/auth.ts`; when `.env` has no
@@ -23,3 +23,7 @@ what it was; an explicitly empty `ROZE_TOKEN_PROXY` with no secret is a clear er
 outside this repository (no new dependency here) and holds the secret as a Worker secret, never in a file.
 The loopback sign-in, PKCE, the owner-only token file, and the renewing token source are unchanged; see
 [[Lightweight, no frameworks]].
+
+Since 2026-09-04 the same Worker also forwards Responses API calls on a separate OpenAI key with a $5
+hard budget when `OPENAI_API_KEY` is unset (`POST /openai/v1/responses`, marker header `x-roze-client`).
+The marker is not a secret; the key's budget is the guard, and the key is revoked after review.

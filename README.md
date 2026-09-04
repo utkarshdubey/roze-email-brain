@@ -11,19 +11,18 @@ roze prompt <query>    answer one question from brain/
 
 ## Setup
 
-You need Node.js 20 or newer and an OpenAI API key.
+You need Node.js 20 or newer. Nothing else: the Google OAuth client and a proxy that holds its
+secret and a budgeted OpenAI key are baked in, so the review runs with no credentials of your own.
 
 ```bash
 git clone https://github.com/utkarshdubey/roze-email-brain
 cd roze-email-brain
 npm install
-cp .env.example .env
 ```
 
-Put your `OPENAI_API_KEY` in `.env`. That is all: the Google OAuth client and the small proxy that
-holds its secret are baked in, so sign-in works without any Google credentials of your own (set
-`GOOGLE_CLIENT_SECRET` in `.env` to use your own client instead). The Gmail account you sign in
-with must be a test user on the OAuth project; agent@roze.ai already is.
+To use your own OpenAI key instead, `cp .env.example .env` and set `OPENAI_API_KEY`; to use your own
+Google client, set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` there too. The Gmail account you
+sign in with must be a test user on the OAuth project; agent@roze.ai already is.
 
 ## Run
 

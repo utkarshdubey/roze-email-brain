@@ -41,7 +41,7 @@ and [[NOTES]] (decisions and tradeoffs); this vault holds the *why* behind them 
 - [[Read each inbox thread once]]
 - [[Ranked retrieval is a derived cache]]
 - [[Deferred features]]
-- [[Token exchange goes through a proxy]]
+- [[The reviewer path goes through a proxy]]
 
 ## Product brief (what it is judged against)
 A CLI with exactly three commands — `auth`, `generate`, `prompt <query>` — that turns a Gmail history into a

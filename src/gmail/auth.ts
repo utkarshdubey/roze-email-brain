@@ -20,7 +20,7 @@ const REFRESH_EARLY_MS = 3 * 60_000 + 45_000;
 // worse than a proxy that only ever exchanges codes for this one client id. Setting GOOGLE_CLIENT_SECRET switches
 // to the direct exchange with Google.
 const DEFAULT_CLIENT_ID = "906042128148-0gkk07sr658itahv17ld9pm740e3n3gf.apps.googleusercontent.com";
-const DEFAULT_TOKEN_PROXY = "https://roze-token-proxy.kaneki.workers.dev";
+export const DEFAULT_TOKEN_PROXY = "https://roze-token-proxy.kaneki.workers.dev";
 
 const credentialsSchema = z
   .object({
