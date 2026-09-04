@@ -73,3 +73,9 @@ process improvement, a second trip); nothing in the list is shaped like the refe
 **End to end with FTS as the agent's search (sealed v4, same day, same harness).** 20 / 9 / 3 → 22 / 7 / 3,
 decoy-free answers 19 → 24 of 27, expected thread cited 31 of 32 both times, mean tool calls 11.5 → 10.7,
 cost $3.18 → $2.78 for the 32 items.
+
+**Cold-Gmail, model-warm build of the second account (344 participated, 4,614 skim, 4,248 bodies), phases
+1–4.** Before: 1,818 s with the 61-second full stop. After, with the learned window at the same 6,000-unit
+quota: 1,111 s; the Gmail line read 59,076 units in 10,662 requests over 1,109 s, and the learned cap settled
+at about 3,350 units a minute, so roughly half the quota is still left on the table by the conservative
+learning rule. A quota increase to 15,000 units a minute is requested and pending Google's approval.
