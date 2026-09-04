@@ -16,7 +16,8 @@ Gmail time: 250 quota units per second per user is Google's documented ceiling (
 list 5), but the quota answer Gmail sends names "units per minute per user", and one measured account was
 refused at about 1,500 units a minute, a tenth of the documented figure. The client keeps a sliding
 one-minute window of the units it spent, learns the real cap from a refusal (90% of what the window held, never
-below a quarter of the documented minute), raises it 5% per quiet ten seconds, and waits only until old units age out, never a whole minute. The
+below a quarter of the documented minute), raises it 5% per quiet ten seconds, spaces requests to spend that cap evenly across the minute (no burst,
+no stall), and waits only until old units age out, never a whole minute. The
 learned cap is printed with the Gmail usage line. Every skim thread is read exactly once (a single-message thread, 97% of the inbox, as one
 5-unit message read), and the body download overlaps the concept
 judge, so the critical path is phases 1–3 plus the longer of the bodies and the judge, plus the review.

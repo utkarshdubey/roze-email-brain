@@ -223,14 +223,14 @@ test("a quota 403 teaches the client its real minute cap and the window waits in
     delays.some((ms) => ms > 0 && ms < 5_000),
     "request spacing",
   );
-  // The window is now full at the floor cap: the next request waits until the oldest unit ages out.
+  // Requests are now spaced to spend the learned cap evenly across a minute: no burst, no stall.
   const before = delays.length;
-  // A tenth more than the cap, because ten quiet seconds of successes raise the cap by five percent.
-  const cap = Math.ceil(client.unitsPerMinute * 1.1);
-  for (let index = 0; index < cap; index += 1) await client.getProfile();
+  for (let index = 0; index < 20; index += 1) await client.getProfile();
+  const spacing = delays.slice(before).filter((ms) => ms > 0);
+  const expected = 60_000 / client.unitsPerMinute;
   assert.ok(
-    delays.slice(before).some((ms) => ms > 1_000 && ms <= 60_000),
-    "a full window waits for old units to expire, bounded by one minute",
+    spacing.length >= 19 && spacing.every((ms) => Math.abs(ms - expected) < 1),
+    `each unit is spaced at 60 s / cap (${expected.toFixed(1)} ms): ${spacing.slice(0, 5).join(", ")}`,
   );
 });
 

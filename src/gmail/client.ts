@@ -21,7 +21,8 @@ const RETRY_CAP_MS = 60_000;
 // 85% of the documented minute, and a quota answer lowers it to 90% of what the window held when Gmail
 // refused (never below a quarter of the documented minute); ten seconds of successes raise it back by 5%. A worker
 // that would overflow the window waits only until enough old units age out, not a whole minute, and the
-// per-second spacing still spreads requests so no burst trips a shorter limit. Measured on an account with
+// per-request spacing follows the learned cap, so the allowance is spent as a steady flow across the minute
+// instead of a burst followed by a stall that looks like a hang. Measured on an account with
 // a low cap: the old 61-second full stop per quota answer ran 300 reads at 4.4/s.
 const QUOTA_UNITS_PER_SECOND = 250;
 const QUOTA_HEADROOM = 0.85;
@@ -31,7 +32,6 @@ const MINUTE_FLOOR = MINUTE_CEILING / 4;
 const CAP_AFTER_REFUSAL = 0.9;
 const CAP_RECOVERY = 1.05;
 const CAP_RAISE_INTERVAL_MS = 10_000;
-const MS_PER_UNIT = 1_000 / (QUOTA_UNITS_PER_SECOND * QUOTA_HEADROOM);
 const QUOTA_RETRY_CAP_MS = 8_000;
 const UNITS = { profile: 1, lists: 5, messages: 5, threads: 10 } as const;
 
@@ -199,7 +199,7 @@ export class GmailClient {
       this.#ageOutSpentUnits(now);
     }
     const slot = Math.max(now, this.#nextRequestAt);
-    this.#nextRequestAt = slot + units * MS_PER_UNIT;
+    this.#nextRequestAt = slot + (units * WINDOW_MS) / this.#unitsPerMinute;
     if (slot > now) {
       await this.#sleep(slot - now);
     }
