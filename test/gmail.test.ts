@@ -212,7 +212,7 @@ test("a quota 403 teaches the client its real minute cap and the window waits in
     `a quota answer costs seconds, not the old 61 s full stop: ${delays.join(", ")}`,
   );
   // One profile unit was in the window when Gmail refused, so the learned cap is the floor, not the ceiling.
-  assert.ok(client.unitsPerMinute < fullCap / 5, `the cap was learned from the window: ${client.unitsPerMinute}`);
+  assert.ok(client.unitsPerMinute < fullCap / 3, `the cap was learned from the window: ${client.unitsPerMinute}`);
   await Promise.all([client.getProfile(), client.getProfile()]);
   assert.deepEqual(
     { requests: client.getUsage().requests, quotaUnits: client.getUsage().quotaUnits },
@@ -225,7 +225,8 @@ test("a quota 403 teaches the client its real minute cap and the window waits in
   );
   // The window is now full at the floor cap: the next request waits until the oldest unit ages out.
   const before = delays.length;
-  const cap = Math.ceil(client.unitsPerMinute);
+  // A tenth more than the cap, because ten quiet seconds of successes raise the cap by five percent.
+  const cap = Math.ceil(client.unitsPerMinute * 1.1);
   for (let index = 0; index < cap; index += 1) await client.getProfile();
   assert.ok(
     delays.slice(before).some((ms) => ms > 1_000 && ms <= 60_000),

@@ -19,7 +19,7 @@ const RETRY_CAP_MS = 60_000;
 // names a limit of "units per minute per user" — one some accounts hit far below the documented figure. So
 // the client keeps a sliding one-minute window of the units it spent and learns the real cap: it starts at
 // 85% of the documented minute, and a quota answer lowers it to 90% of what the window held when Gmail
-// refused (never below a tenth of the documented minute); ten seconds of successes raise it back by 2%. A worker
+// refused (never below a quarter of the documented minute); ten seconds of successes raise it back by 5%. A worker
 // that would overflow the window waits only until enough old units age out, not a whole minute, and the
 // per-second spacing still spreads requests so no burst trips a shorter limit. Measured on an account with
 // a low cap: the old 61-second full stop per quota answer ran 300 reads at 4.4/s.
@@ -27,9 +27,9 @@ const QUOTA_UNITS_PER_SECOND = 250;
 const QUOTA_HEADROOM = 0.85;
 const WINDOW_MS = 60_000;
 const MINUTE_CEILING = QUOTA_UNITS_PER_SECOND * 60 * QUOTA_HEADROOM;
-const MINUTE_FLOOR = MINUTE_CEILING / 10;
+const MINUTE_FLOOR = MINUTE_CEILING / 4;
 const CAP_AFTER_REFUSAL = 0.9;
-const CAP_RECOVERY = 1.02;
+const CAP_RECOVERY = 1.05;
 const CAP_RAISE_INTERVAL_MS = 10_000;
 const MS_PER_UNIT = 1_000 / (QUOTA_UNITS_PER_SECOND * QUOTA_HEADROOM);
 const QUOTA_RETRY_CAP_MS = 8_000;
