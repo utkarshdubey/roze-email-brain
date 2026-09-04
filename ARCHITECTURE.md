@@ -11,6 +11,8 @@ and a plain-file output.
 - `auth` performs loopback Google OAuth with `gmail.readonly`, verifies the profile, and saves an
   owner-only token. Later commands spend it through a token source that renews it a few minutes
   before expiry and once more after a 401, so a build longer than an access token's hour survives.
+  Without a `GOOGLE_CLIENT_SECRET` in `.env`, the code exchange and every refresh go through a small
+  token proxy (`ROZE_TOKEN_PROXY`, baked-in default) that holds the secret; with one they go to Google.
 - `generate` reads Gmail, derives memory, renders a complete staging tree, then swaps it into place.
 - `prompt <query>` answers once through three read-only tools and audits the resulting citations.
 
@@ -220,7 +222,7 @@ src/commands/prompt.ts            `roze prompt`: one question, answer, counters
 src/generation/phases.ts          phase plan, recent window, and mid-build "not yet available" status
 src/generation/buildBrain.ts      phased build, engagement ordering, staged render, metadata
 src/gmail/client.ts               paced, retrying, quota-metered Gmail reads; ingest entry point
-src/gmail/auth.ts                 loopback OAuth sign-in, owner-only token file, refresh
+src/gmail/auth.ts                 loopback OAuth sign-in, token file, refresh direct or via the token proxy
 src/gmail/messages.ts             Gmail wire format to EmailMessage: MIME, addresses, sender-local dates
 src/gmail/http.ts                 injectable fetch and one shape for a failed Google answer
 src/ingest/mail.ts                full-read ids, resumable fetch, configurable recent skim; ingest entry point

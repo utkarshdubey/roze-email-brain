@@ -15,6 +15,12 @@ export const GOOGLE_TOKEN_URI = "https://oauth2.googleapis.com/token";
 const GOOGLE_AUTH_URI = "https://accounts.google.com/o/oauth2/auth";
 /** Refreshed a little early, so a long fetch cannot expire mid-flight. */
 const REFRESH_EARLY_MS = 3 * 60_000 + 45_000;
+// The project's public OAuth client and the proxy that holds its secret, so a fresh clone signs in with only an
+// OpenAI key in .env. A desktop OAuth client's secret is not truly secret, but handing it out in a .env is still
+// worse than a proxy that only ever exchanges codes for this one client id. Setting GOOGLE_CLIENT_SECRET switches
+// to the direct exchange with Google.
+const DEFAULT_CLIENT_ID = "906042128148-0gkk07sr658itahv17ld9pm740e3n3gf.apps.googleusercontent.com";
+const DEFAULT_TOKEN_PROXY = "https://roze-token-proxy.kaneki.workers.dev";
 
 const credentialsSchema = z
   .object({
@@ -22,12 +28,15 @@ const credentialsSchema = z
     refresh_token: z.string(),
     token_uri: z.string().min(1),
     client_id: z.string().min(1),
-    client_secret: z.string().min(1),
+    client_secret: z.string(),
+    /** Set, with an empty client_secret, when the proxy exchanged the code and must refresh the token too. */
+    token_proxy: z.string().min(1).optional(),
     scopes: z.array(z.string()),
     expiry: z.string().refine((value) => Number.isFinite(Date.parse(value))),
   })
   // google-auth writes extra fields (account, universe_domain); its token files must still load
-  .loose();
+  .loose()
+  .refine((value) => value.client_secret.length > 0 || value.token_proxy !== undefined);
 const tokenSchema = z.object({
   access_token: z.string().min(1),
   refresh_token: z.string().min(1).optional(),
@@ -52,28 +61,51 @@ const saveCredentials = (path: string, value: GoogleCredentials): void =>
 
 const expiresAt = (now: number, seconds: number): string => new Date(now + seconds * 1_000).toISOString();
 
-function readClientConfiguration(): { clientId: string; clientSecret: string } {
-  loadEnvironmentFile();
-  const clientId = process.env.GOOGLE_CLIENT_ID;
-  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
-  if (!clientId || !clientSecret)
-    throw new Error(
-      "Missing GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET. Copy .env.example to .env and fill in a Google " +
-        "OAuth 'Desktop app' client.",
-    );
-  return { clientId, clientSecret };
+/** Where token requests go: straight to Google with the secret, or through the proxy that holds it. */
+interface TokenExchange {
+  clientId: string;
+  clientSecret: string;
+  tokenProxy?: string;
 }
 
+function readClientConfiguration(): TokenExchange {
+  loadEnvironmentFile();
+  const clientId = process.env.GOOGLE_CLIENT_ID || DEFAULT_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET ?? "";
+  // An explicitly empty ROZE_TOKEN_PROXY opts out of the default proxy.
+  const tokenProxy = process.env.ROZE_TOKEN_PROXY ?? DEFAULT_TOKEN_PROXY;
+  if (clientSecret) return { clientId, clientSecret };
+  if (tokenProxy) return { clientId, clientSecret: "", tokenProxy };
+  throw new Error(
+    "Set GOOGLE_CLIENT_SECRET (a Google OAuth 'Desktop app' client) or ROZE_TOKEN_PROXY (a token proxy URL) " +
+      "in .env.",
+  );
+}
+
+const exchangeFor = (credentials: GoogleCredentials): TokenExchange => ({
+  clientId: credentials.client_id,
+  clientSecret: credentials.client_secret,
+  tokenProxy: credentials.token_proxy,
+});
+
 async function requestTokens(
-  fields: URLSearchParams,
+  exchange: TokenExchange,
+  grant: Record<string, string>,
   fetcher: FetchLike,
   action: string,
 ): Promise<z.output<typeof tokenSchema>> {
-  const response = await fetcher(GOOGLE_TOKEN_URI, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: fields,
-  });
+  // The proxy adds the client id and secret itself and answers with Google's document and status.
+  const response = exchange.clientSecret
+    ? await fetcher(GOOGLE_TOKEN_URI, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ client_id: exchange.clientId, client_secret: exchange.clientSecret, ...grant }),
+      })
+    : await fetcher(`${exchange.tokenProxy}/token`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(grant),
+      });
   if (!response.ok) throw new Error((await describeHttpFailure(response, action)).message);
   try {
     return tokenSchema.parse(await response.json());
@@ -90,12 +122,8 @@ async function refreshAccessToken(
     throw new Error("Stored Google credentials have no refresh token. Run `roze auth` again.");
   const now = options.now?.() ?? Date.now();
   const tokens = await requestTokens(
-    new URLSearchParams({
-      client_id: credentials.client_id,
-      client_secret: credentials.client_secret,
-      refresh_token: credentials.refresh_token,
-      grant_type: "refresh_token",
-    }),
+    exchangeFor(credentials),
+    { refresh_token: credentials.refresh_token, grant_type: "refresh_token" },
     options.fetch ?? globalThis.fetch,
     "Google token refresh",
   );
@@ -272,22 +300,18 @@ function buildAuthorizationUrl(clientId: string, redirectUri: string, state: str
 }
 
 export async function signInWithGoogle(options: SignInOptions = {}): Promise<GoogleCredentials> {
-  const { clientId, clientSecret } = readClientConfiguration();
+  const exchange = readClientConfiguration();
   const state = randomBytes(24).toString("base64url");
   const verifier = randomBytes(48).toString("base64url");
   const callback = await startCallbackServer(state, options.timeoutMs ?? 5 * 60_000);
   try {
-    await (options.openBrowser ?? openBrowser)(buildAuthorizationUrl(clientId, callback.redirectUri, state, verifier));
+    await (options.openBrowser ?? openBrowser)(
+      buildAuthorizationUrl(exchange.clientId, callback.redirectUri, state, verifier),
+    );
     const code = await callback.code;
     const tokens = await requestTokens(
-      new URLSearchParams({
-        code,
-        client_id: clientId,
-        client_secret: clientSecret,
-        redirect_uri: callback.redirectUri,
-        grant_type: "authorization_code",
-        code_verifier: verifier,
-      }),
+      exchange,
+      { code, redirect_uri: callback.redirectUri, grant_type: "authorization_code", code_verifier: verifier },
       options.fetch ?? globalThis.fetch,
       "Google authorization-code exchange",
     );
@@ -297,8 +321,9 @@ export async function signInWithGoogle(options: SignInOptions = {}): Promise<Goo
       token: tokens.access_token,
       refresh_token: tokens.refresh_token,
       token_uri: GOOGLE_TOKEN_URI,
-      client_id: clientId,
-      client_secret: clientSecret,
+      client_id: exchange.clientId,
+      client_secret: exchange.clientSecret,
+      ...(exchange.tokenProxy === undefined ? {} : { token_proxy: exchange.tokenProxy }),
       scopes: [GMAIL_SCOPE],
       expiry: expiresAt(options.now?.() ?? Date.now(), tokens.expires_in),
     };

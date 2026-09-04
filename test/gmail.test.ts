@@ -344,3 +344,110 @@ test("sign-in releases the callback server even while the browser holds a keep-a
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/** Sets env vars for one test and restores them; a previously unset key is deleted, not set to "undefined". */
+async function withEnvironment(values: Record<string, string>, run: () => Promise<void>): Promise<void> {
+  const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, values);
+  try {
+    await run();
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+test("without a client secret the code exchange posts JSON to the token proxy and never sends a secret", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "roze-proxy-auth-"));
+  const requests: { url: string; contentType: string; body: string }[] = [];
+  await withEnvironment(
+    { GOOGLE_CLIENT_ID: "client", GOOGLE_CLIENT_SECRET: "", ROZE_TOKEN_PROXY: "http://proxy.test" },
+    async () => {
+      try {
+        const path = join(dir, "token.json");
+        const saved = await signInWithGoogle({
+          tokenPath: path,
+          timeoutMs: 60_000,
+          openBrowser: (url) => {
+            const redirect = new URL(new URL(url).searchParams.get("redirect_uri")!);
+            redirect.searchParams.set("state", new URL(url).searchParams.get("state")!);
+            redirect.searchParams.set("code", "auth-code");
+            httpRequest(redirect, (response) => response.resume()).end();
+          },
+          fetch: async (input, init) => {
+            requests.push({
+              url: String(input),
+              contentType: String(new Headers(init?.headers).get("content-type")),
+              body: String(init?.body),
+            });
+            return Response.json({ access_token: "access", refresh_token: "refresh", expires_in: 3600 });
+          },
+        });
+        assert.equal(requests.length, 1);
+        assert.equal(requests[0]?.url, "http://proxy.test/token");
+        assert.equal(requests[0]?.contentType, "application/json");
+        const body = JSON.parse(requests[0]?.body ?? "{}") as Record<string, string>;
+        assert.equal(body.grant_type, "authorization_code");
+        assert.equal(body.code, "auth-code");
+        assert.ok(body.code_verifier && body.redirect_uri, "PKCE verifier and redirect travel with the code");
+        assert.ok(!("client_secret" in body) && !("client_id" in body), "the proxy adds the client itself");
+        assert.equal(saved.client_secret, "");
+        assert.equal(saved.token_proxy, "http://proxy.test");
+        const stored = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+        assert.equal(stored.token_proxy, "http://proxy.test");
+        assert.equal(stored.client_id, "client");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
+test("a refresh through the token source goes to the proxy when the file names one, and is saved", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "roze-proxy-refresh-"));
+  const path = join(directory, ".token.json");
+  try {
+    writeFileSync(
+      path,
+      JSON.stringify({
+        ...credentials,
+        client_secret: "",
+        token_proxy: "http://proxy.test",
+        expiry: "2020-01-01T00:00:00Z",
+      }),
+    );
+    const requests: { url: string; body: string }[] = [];
+    const fetcher: FetchLike = async (input, init) => {
+      requests.push({ url: String(input), body: String(init?.body) });
+      return Response.json({ access_token: "fresh", expires_in: 3600 });
+    };
+    const now = (): number => Date.parse("2026-01-01T00:00:00Z");
+    const source = createTokenSource({ tokenPath: path, fetch: fetcher, now });
+    assert.equal(await source.token(), "fresh");
+    assert.deepEqual(requests, [
+      {
+        url: "http://proxy.test/token",
+        body: JSON.stringify({ refresh_token: "refresh", grant_type: "refresh_token" }),
+      },
+    ]);
+    const stored = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    assert.equal(stored.token, "fresh");
+    assert.equal(stored.token_proxy, "http://proxy.test", "the renewed file still knows where to refresh next time");
+    assert.equal(stored.client_secret, "");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a stored token with neither a client secret nor a token proxy is rejected", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "roze-proxy-invalid-"));
+  const path = join(directory, ".token.json");
+  try {
+    writeFileSync(path, JSON.stringify({ ...credentials, client_secret: "" }));
+    await assert.rejects(loadSavedCredentials({ tokenPath: path }), /Stored token is invalid/u);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

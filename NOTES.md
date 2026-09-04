@@ -176,6 +176,14 @@ among the workers that reach the boundary together, renews once more if Gmail st
 saves the result for the next command. A failed renewal surfaces as "run `roze auth`", not as a
 request that failed six times.
 
+A reviewer needs only an OpenAI key. The project's public OAuth client id is a default in `auth.ts`, and
+without a `GOOGLE_CLIENT_SECRET` in `.env` the authorization-code exchange and every refresh go through a
+small Cloudflare Worker (`ROZE_TOKEN_PROXY`, also a default) that holds the secret, adds the client id and
+secret, and returns Google's answer unchanged. A desktop client's secret is not truly secret, but handing it
+out in a `.env` is still worse than a proxy that only ever exchanges codes for this one client id. The token
+file records the proxy so refreshes keep working; with a secret present nothing changes and Google is called
+directly.
+
 Gmail work and model work overlap wherever nothing depends on both: the first header skim overlaps
 full-read extraction, and body fetching overlaps concept judging, since only the review that follows
 needs the recurring merchants parsed from every stored body. `buildConcepts` is split at that seam into
