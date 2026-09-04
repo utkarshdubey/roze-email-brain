@@ -51,7 +51,10 @@ export function formatGmailUsage(usage: GmailUsageSnapshot): string {
     `Gmail: ${count(usage.quotaUnits)} units in ${count(usage.requests)} requests ` +
     `(threads ${count(usage.byResource.threads.requests)} · ` +
     `messages ${count(usage.byResource.messages.requests)} · ` +
-    `lists ${count(usage.byResource.lists.requests)}), ${count(Math.round(usage.elapsedMs / 1_000))} s`
+    `lists ${count(usage.byResource.lists.requests)}), ${count(Math.round(usage.elapsedMs / 1_000))} s` +
+    (usage.unitsPerMinute < usage.unitsPerMinuteCeiling
+      ? `; Gmail granted about ${count(Math.round(usage.unitsPerMinute))} units a minute`
+      : "")
   );
 }
 
