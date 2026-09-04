@@ -45,8 +45,8 @@ literal scanner and the FTS index, `any_term`:
 |---|---|---|---|
 | v3 sealed, 33 | all | 39.4% / 0.199 / 5,056 | 87.9% / 0.455 / 687 |
 | v3 sealed, 33 | thread_summaries | 39.4% / 0.199 / 356 | 87.9% / 0.678 / 226 |
-| v4 sealed, 32 | all | (see bench/results) | 84.4% / 0.493 / 742 |
-| v4 sealed, 32 | thread_summaries | (see bench/results) | 87.5% / 0.638 / 239 |
+| v4 sealed, 32 | all | 34.4% / 0.144 / 5,010 | 84.4% / 0.493 / 742 |
+| v4 sealed, 32 | thread_summaries | 31.3% / 0.142 / 383 | 87.5% / 0.638 / 239 |
 
 `all_terms` with a whole question matches nothing on either engine, as expected. FTS is the default;
 `ROZE_SEARCH=literal` restores the scanner.
