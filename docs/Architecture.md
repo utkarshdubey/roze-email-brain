@@ -15,9 +15,9 @@ the proposal trace, published by a staged swap. Details: [[Pipeline phases]], [[
 [[Brain layout]].
 
 ## Answer (`roze prompt`)
-Question → an agent with three typed, non-mutating tools (`search_memory` with tallies, `read_memory`,
-`read_email`) over an explicit path allowlist → citation grounding audit and header round → answer with
-mandatory `[t:<thread> <day>]` citations. Details: [[Query agent]].
+Question → an agent with three typed, non-mutating tools (`search_memory` with a derived ranked index and
+scanner-backed tallies, `read_memory`, `read_email`) over an explicit path allowlist → citation grounding
+audit and header round → answer with mandatory `[t:<thread> <day>]` citations. Details: [[Query agent]].
 
 ## Boundaries that matter
 - Models propose; code owns provenance, identity, lifecycle, deduplication, cost, and publication.

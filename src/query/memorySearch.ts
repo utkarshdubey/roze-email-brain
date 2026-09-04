@@ -1,14 +1,13 @@
-// search_memory: literal, case-insensitive matching over the generated files of one scope. With
-// `group_by=none` matching lines are scored and listed; with any other `group_by` the same matcher tallies
-// every matching row once per THREAD, so the counts and sums are themselves the answer to how-often and
-// how-much questions. Matching is fixed-string, so no query can smuggle a pattern into retrieval.
+// search_memory: ranked hits come from the derived FTS index when selected, while the literal scanner stays
+// the reference and always owns grouped tallies. Both paths preserve the scope allowlist and rendered output;
+// fixed-string query handling means no user input can become a regex or FTS operator.
 import { readFileSync } from "node:fs";
 
 import type { SearchScope } from "../brain/storage.js";
 import { cleanText } from "../shared/text.js";
 import { listFiles } from "./memoryPaths.js";
+import { searchIndexedMemory, type SearchEngine, type SearchIndexOptions } from "./searchIndex.js";
 import { capMiddle, linesOf, searchArguments, type Amounts, type Group, type Match } from "./toolContracts.js";
-
 
 const DAY_IN_LINE = /\b(20\d\d)-(\d\d)-(\d\d)\b/gu;
 const ROW_ID = /^([0-9a-f]{8,}) \| (\d{4}-\d{2}-\d{2})/u;
@@ -236,7 +235,7 @@ function quoteQuery(query: string): string {
   return `'${query.replace(/\\/gu, "\\\\").replace(/'/gu, "\\'")}'`;
 }
 
-export function searchMemory(
+export function searchLiteralMemory(
   brainDir: string,
   query: string,
   scope: SearchScope = "all",
@@ -288,4 +287,73 @@ export function searchMemory(
       ...selected.map((hit) => `${hit.path}:${hit.line}: ${hit.text}`),
     ].join("\n"),
   );
+}
+
+export interface SearchMemoryOptions extends SearchIndexOptions {
+  engine?: SearchEngine;
+  /** The prompt path supplies its stderr trace here; benches may throw to reject a mislabeled fallback. */
+  onIndexFallback?: (message: string) => void;
+}
+
+const DEFAULT_SEARCH_ENGINE: SearchEngine = "fts";
+let reportedIndexFallback = false;
+
+function selectedSearchEngine(options: SearchMemoryOptions): SearchEngine {
+  const selected = options.engine ?? process.env.ROZE_SEARCH ?? DEFAULT_SEARCH_ENGINE;
+  if (selected === "literal" || selected === "fts") return selected;
+  throw new Error("ROZE_SEARCH must be either literal or fts");
+}
+
+function reportIndexFallbackOnce(error: unknown, report: SearchMemoryOptions["onIndexFallback"]): void {
+  if (!report || reportedIndexFallback) return;
+  reportedIndexFallback = true;
+  const reason = error instanceof Error ? error.message : String(error);
+  report(`FTS search is unavailable; using the literal scanner (${reason}).`);
+}
+
+/** Ranked search dispatches to FTS, but any tally and every failed index operation use the scanner unchanged. */
+export function searchMemory(
+  brainDir: string,
+  query: string,
+  scope: SearchScope = "all",
+  match: Match = "all_terms",
+  limit = 20,
+  groupBy: Group = "none",
+  amounts: Amounts = "ignore",
+  from = "",
+  to = "",
+  options: SearchMemoryOptions = {},
+): string {
+  if (groupBy !== "none" || selectedSearchEngine(options) === "literal") {
+    return searchLiteralMemory(brainDir, query, scope, match, limit, groupBy, amounts, from, to);
+  }
+
+  const input = searchArguments.parse({
+    query: query.trim().replace(/\s+/gu, " "),
+    scope,
+    match,
+    limit,
+    group_by: groupBy,
+    amounts,
+    from,
+    to,
+  });
+  const quoted = quoteQuery(input.query);
+  try {
+    const result = searchIndexedMemory(brainDir, input.query, input.scope, input.match, input.limit, {
+      sqlite: options.sqlite,
+    });
+    if (!result.hits.length)
+      return `No literal matches for ${quoted} in ${scope} (${result.filesSearched} files searched).`;
+    return capMiddle(
+      [
+        `${result.hits.length} of ${result.total} matches for ${quoted} in ${scope} ` +
+          `(${result.filesSearched} files searched):`,
+        ...result.hits.map((hit) => `${hit.path}:${hit.line}: ${hit.text}`),
+      ].join("\n"),
+    );
+  } catch (error) {
+    reportIndexFallbackOnce(error, options.onIndexFallback);
+    return searchLiteralMemory(brainDir, query, scope, match, limit, groupBy, amounts, from, to);
+  }
 }

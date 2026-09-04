@@ -43,6 +43,7 @@ import { checkBudgetBeforeStage } from "../llm/models.js";
 import { estimateExtractionCost, extractMemoryFromAllThreads } from "../memory/extractThread.js";
 import { listOpenLoops } from "../memory/openLoops.js";
 import { EntityRegistry } from "../memory/resolveEntities.js";
+import { invalidateSearchIndex } from "../query/searchIndex.js";
 import { writeDataAtomically } from "../shared/atomicFiles.js";
 import { buildOffsetTimeline, localizeHeader, localizeThread, type OffsetTimeline } from "../shared/dates.js";
 import type { Ui } from "../tui.js";
@@ -193,6 +194,7 @@ class BrainBuild {
       return;
     }
     this.published = await stageThenSwap(this.context.paths.root, async (root) => this.renderInto(root, build));
+    invalidateSearchIndex(this.context.paths);
     const where = build.phase === 1 ? ` to ${this.context.paths.root}` : "";
     const hint = build.complete ? "" : " `roze prompt` works now from another terminal while this keeps building.";
     this.ui.step(`Phase ${build.phase}/${build.phases} published after ${elapsed}${where}: ${summary}${hint}`);

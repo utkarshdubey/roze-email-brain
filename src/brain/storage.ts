@@ -38,6 +38,7 @@ export function resolveBrainPaths(root?: string, account?: string) {
     cachedOnDemandFile: join(cacheDir, "on-demand.txt"),
     cachedExtractionsDir: join(cacheDir, "extractions"),
     cachedConceptsDir: join(cacheDir, "concepts"),
+    searchIndexFile: join(cacheDir, "search.sqlite"),
   };
 }
 

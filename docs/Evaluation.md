@@ -23,3 +23,12 @@ items. See [[No test-specific or inbox-specific rules]].
 
 Model experiments: gpt-5.4 answers beat gpt-5.4-mini (23 vs 14 correct on v4); moving the concept judge to
 gpt-5.4 did not help; Gemma 4 (26B regresses, 31B free-tier only) was rejected. See [[Models and effort]].
+
+Offline retrieval on the 30-item development set, using the question verbatim with `limit=20`, improved
+under FTS for the useful broad mode. In `scope=all`, `any_term` hit@20 moved 11/30 → 22/30, MRR
+0.2043 → 0.4572, and mean search time 7,435.03 ms → 624.94 ms (11.90×). In
+`scope=thread_summaries`, hit@20 moved 11/30 → 28/30 and MRR 0.2043 → 0.5340; latency moved
+331.52 ms → 209.66 ms. Across both scopes and both match modes, the mean was 3,073.20 ms literal versus
+214.25 ms FTS (14.34×); building the cold 342 MB index took 12.41 s. Both engines returned zero strict
+`all_terms` hits because whole natural-language questions rarely occur on one line. This is development-set
+evidence, not a sealed-set result. See [[Ranked retrieval is a derived cache]].

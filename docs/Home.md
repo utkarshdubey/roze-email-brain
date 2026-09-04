@@ -39,6 +39,7 @@ and [[NOTES]] (decisions and tradeoffs); this vault holds the *why* behind them 
 - [[Lightweight, no frameworks]]
 - [[One status board owns the terminal]]
 - [[Read each inbox thread once]]
+- [[Ranked retrieval is a derived cache]]
 - [[Deferred features]]
 
 ## Product brief (what it is judged against)

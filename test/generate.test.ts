@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { PUBLISH_TARGETS } from "../src/brain/storage.js";
+import { PUBLISH_TARGETS, resolveBrainPaths } from "../src/brain/storage.js";
 import { runGenerateCommand } from "../src/commands/generate.js";
 import type { GmailUsageSnapshot } from "../src/gmail/client.js";
 import type { GmailReader } from "../src/ingest/mail.js";
@@ -334,6 +334,9 @@ test("generate publishes every target offline and reports only expected cost lan
   const workspace = mkdtempSync(join(tmpdir(), "roze-generate-"));
   const root = join(workspace, "brain");
   try {
+    const staleSearchIndex = resolveBrainPaths(root, USER).searchIndexFile;
+    mkdirSync(join(root, ".cache", USER), { recursive: true });
+    writeFileSync(staleSearchIndex, "stale derived index");
     const kinds: string[] = [];
     const output: string[] = [];
     const diagnostics: string[] = [];
@@ -379,6 +382,7 @@ test("generate publishes every target offline and reports only expected cost lan
     for (const target of PUBLISH_TARGETS) assert.ok(existsSync(join(root, target)), target);
     assert.ok(existsSync(join(root, "concepts", "TRACE.md")), "the proposal trace is always published");
     assert.ok(existsSync(join(root, ".cache", USER, "threads")), "caches are scoped by account");
+    assert.ok(!existsSync(staleSearchIndex), "a successful publication invalidates the derived search index");
     const meta = JSON.parse(readFileSync(join(root, "meta.json"), "utf8"));
     assert.deepEqual(Object.keys(meta).sort(), [
       "build",
