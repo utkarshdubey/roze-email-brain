@@ -205,7 +205,9 @@ function runSearch(brain: string, item: RetrievalItem, scope: BenchScope, match:
           },
         }
       : { engine };
-  return searchMemory(brain, item.question, scope, match, 20, "none", "ignore", "", "", options);
+  // The tool contract caps a query at 200 characters, so a long question is cut at the last word inside it.
+  const query = item.question.length <= 200 ? item.question : item.question.slice(0, 200).replace(/\s+\S*$/u, "");
+  return searchMemory(brain, query, scope, match, 20, "none", "ignore", "", "", options);
 }
 
 function runBench(items: readonly RetrievalItem[], brain: string, engine: Engine): SearchResult[] {
