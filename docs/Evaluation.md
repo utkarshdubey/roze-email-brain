@@ -69,3 +69,7 @@ threads on the second account). The client now learns the cap from a sliding one
 25 → 21 interests; 9 of the 54 accepted concepts came from topic clusters. The new projects are work
 efforts the entity and domain families had missed (a deals-book correction, a counterparty setup, a risk
 process improvement, a second trip); nothing in the list is shaped like the reference mailbox.
+
+**End to end with FTS as the agent's search (sealed v4, same day, same harness).** 20 / 9 / 3 → 22 / 7 / 3,
+decoy-free answers 19 → 24 of 27, expected thread cited 31 of 32 both times, mean tool calls 11.5 → 10.7,
+cost $3.18 → $2.78 for the 32 items.
