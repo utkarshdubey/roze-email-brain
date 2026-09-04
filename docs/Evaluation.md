@@ -32,3 +32,35 @@ under FTS for the useful broad mode. In `scope=all`, `any_term` hit@20 moved 11/
 214.25 ms FTS (14.34×); building the cold 342 MB index took 12.41 s. Both engines returned zero strict
 `all_terms` hits because whole natural-language questions rarely occur on one line. This is development-set
 evidence, not a sealed-set result. See [[Ranked retrieval is a derived cache]].
+
+## 2026-09-03, evening: what the three streams measured
+
+Same-harness baselines, run on the day, on the reference brain (single runs move by two or three items):
+dev 18 / 9 / 3, sealed v4 20 / 9 / 3, the 11 v3 concept items 0 / 7 / 4 (all grounded).
+
+**Retrieval (sealed sets, question verbatim cut to the 200-character tool contract, `limit=20`).** The
+literal scanner and the FTS index, `any_term`:
+
+| Set | Scope | literal hit@20 / MRR / ms | FTS hit@20 / MRR / ms |
+|---|---|---|---|
+| v3 sealed, 33 | all | 39.4% / 0.199 / 5,056 | 87.9% / 0.455 / 687 |
+| v3 sealed, 33 | thread_summaries | 39.4% / 0.199 / 356 | 87.9% / 0.678 / 226 |
+| v4 sealed, 32 | all | (see bench/results) | 84.4% / 0.493 / 742 |
+| v4 sealed, 32 | thread_summaries | (see bench/results) | 87.5% / 0.638 / 239 |
+
+`all_terms` with a whole question matches nothing on either engine, as expected. FTS is the default;
+`ROZE_SEARCH=literal` restores the scanner.
+
+**Concept layer (trace, per-year entity split, topic clusters).** Rebuild on the reference brain $1.30:
+29 → 30 projects, 107 → 92 interests, 390 traced proposals, 19 accepted concepts came from topic clusters.
+The 11 concept items: 0 / 7 / 4 → 1 / 6 / 4, expected thread cited 10 → 11 of 11, decoys 8 → 7 of 10.
+Neutral on this small set; the trace itself costs nothing and changes no accepted list.
+
+**Promotion with engagement counts on the sender line.** Second-opinion agreement (gpt-5.4, 120 samples)
+on a second account: 59 / 94 before, 55 / 95 after; the judge does not see the engagement columns, so this
+is not decision-grade, and the change is kept only because the body-order signal is the same arithmetic.
+
+**Gmail speed.** The binding limit was never the documented 250 units per second: this project's Cloud
+quota "Units per minute per user" is 6,000 (the default is 15,000, adjustable in the console), and the old
+61-second full stop per quota answer ran a cold build at about 4 reads a second (1,818 s to store 4,600
+threads on the second account). The client now learns the cap from a sliding one-minute window.
