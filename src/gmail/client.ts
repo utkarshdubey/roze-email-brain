@@ -15,13 +15,24 @@ const METADATA_HEADERS = ["From", "To", "Cc", "Subject", "Date", "List-Id"];
 const ATTEMPTS = 6;
 const QUOTA_ATTEMPTS = 12;
 const RETRY_CAP_MS = 60_000;
-/** The per-user limit is per minute; after a quota answer every worker waits for the window to reset. */
-const QUOTA_COOLDOWN_MS = 61_000;
-// Gmail allows 250 quota units per user per second; pacing by unit cost at 85% headroom gives about 42
-// metadata reads/s and 21 full thread reads/s, leaving room for retries.
+// Gmail's documented ceiling is 250 quota units per user per second, and the quota answer it actually sends
+// names a limit of "units per minute per user" — one some accounts hit far below the documented figure. So
+// the client keeps a sliding one-minute window of the units it spent and learns the real cap: it starts at
+// 85% of the documented minute, and a quota answer lowers it to 90% of what the window held when Gmail
+// refused (never below a tenth of the documented minute); ten seconds of successes raise it back by 2%. A worker
+// that would overflow the window waits only until enough old units age out, not a whole minute, and the
+// per-second spacing still spreads requests so no burst trips a shorter limit. Measured on an account with
+// a low cap: the old 61-second full stop per quota answer ran 300 reads at 4.4/s.
 const QUOTA_UNITS_PER_SECOND = 250;
 const QUOTA_HEADROOM = 0.85;
+const WINDOW_MS = 60_000;
+const MINUTE_CEILING = QUOTA_UNITS_PER_SECOND * 60 * QUOTA_HEADROOM;
+const MINUTE_FLOOR = MINUTE_CEILING / 10;
+const CAP_AFTER_REFUSAL = 0.9;
+const CAP_RECOVERY = 1.02;
+const CAP_RAISE_INTERVAL_MS = 10_000;
 const MS_PER_UNIT = 1_000 / (QUOTA_UNITS_PER_SECOND * QUOTA_HEADROOM);
+const QUOTA_RETRY_CAP_MS = 8_000;
 const UNITS = { profile: 1, lists: 5, messages: 5, threads: 10 } as const;
 
 const profileSchema = z.object({
@@ -53,6 +64,9 @@ export interface GmailUsageSnapshot {
   readonly byResource: Readonly<Record<GmailResourceKind, GmailResourceUsage>>;
   /** Wall span from the first outbound attempt through the latest completion; zero before the first attempt. */
   readonly elapsedMs: number;
+  /** The per-minute unit cap the client learned from Gmail's refusals; the documented ceiling until one arrives. */
+  readonly unitsPerMinute: number;
+  readonly unitsPerMinuteCeiling: number;
 }
 
 export class GmailRequestError extends Error {
@@ -110,8 +124,12 @@ export class GmailClient {
   #activeRequests = 0;
   /** Earliest the next request may leave, advanced by each request's own quota cost. */
   #nextRequestAt = 0;
-  /** Set by a quota answer; every worker on this client holds off until the window has reset. */
-  #pausedUntil = 0;
+  /** Units spent in the last minute, oldest first, so the window can be summed and aged. */
+  readonly #spent: Array<{ at: number; units: number }> = [];
+  #spentInWindow = 0;
+  /** Units per minute the client currently allows itself; adaptive, see the constants above. */
+  #unitsPerMinute = MINUTE_CEILING;
+  #lastCapRaiseAt = 0;
 
   /** A token source renews mid-build; a credentials object or bare string is spent as-is (sign-in, tests). */
   constructor(credentials: AccessTokenSource | GoogleCredentials | string, options: GmailClientOptions = {}) {
@@ -160,24 +178,56 @@ export class GmailClient {
       quotaUnits: resources.reduce((sum, usage) => sum + usage.quotaUnits, 0),
       byResource,
       elapsedMs: Math.max(0, elapsedMs),
+      unitsPerMinute: this.#unitsPerMinute,
+      unitsPerMinuteCeiling: MINUTE_CEILING,
     };
   }
 
-  async #takeRequestSlot(units: number): Promise<void> {
-    if (this.#pausedUntil > Date.now()) {
-      await this.#sleep(this.#pausedUntil - Date.now());
+  #ageOutSpentUnits(now: number): void {
+    while (this.#spent.length && this.#spent[0]!.at <= now - WINDOW_MS) {
+      this.#spentInWindow -= this.#spent.shift()!.units;
     }
-    const now = Date.now();
+  }
+
+  /** Waits for the minute window to have room, then for the per-second spacing, then books the units. */
+  async #takeRequestSlot(units: number): Promise<void> {
+    let now = this.#now();
+    this.#ageOutSpentUnits(now);
+    while (this.#spent.length && this.#spentInWindow + units > this.#unitsPerMinute) {
+      await this.#sleep(Math.max(1, this.#spent[0]!.at + WINDOW_MS - now));
+      now = this.#now();
+      this.#ageOutSpentUnits(now);
+    }
     const slot = Math.max(now, this.#nextRequestAt);
     this.#nextRequestAt = slot + units * MS_PER_UNIT;
     if (slot > now) {
       await this.#sleep(slot - now);
     }
+    this.#spent.push({ at: slot, units });
+    this.#spentInWindow += units;
   }
 
-  async #pauseForQuotaWindow(): Promise<void> {
-    this.#pausedUntil = Math.max(this.#pausedUntil, Date.now() + Math.min(RETRY_CAP_MS, QUOTA_COOLDOWN_MS));
-    await this.#sleep(this.#pausedUntil - Date.now());
+  /** Gmail refused at this spend: learn the cap from the window, then retry after a short backoff. */
+  async #learnCapFromQuotaAnswer(response: Response, attempt: number): Promise<void> {
+    this.#ageOutSpentUnits(this.#now());
+    this.#unitsPerMinute = Math.max(
+      MINUTE_FLOOR,
+      Math.min(this.#unitsPerMinute, this.#spentInWindow * CAP_AFTER_REFUSAL),
+    );
+    await this.#sleep(Math.min(QUOTA_RETRY_CAP_MS, retryDelayMs(response, attempt)));
+  }
+
+  /** Recovery is by time, not by count, so a long run of small requests cannot outrun a learned cap. */
+  #raiseCapAfterQuietSuccesses(): void {
+    const now = this.#now();
+    if (now - this.#lastCapRaiseAt < CAP_RAISE_INTERVAL_MS) return;
+    this.#lastCapRaiseAt = now;
+    this.#unitsPerMinute = Math.min(MINUTE_CEILING, this.#unitsPerMinute * CAP_RECOVERY);
+  }
+
+  /** The minute cap the client currently believes Gmail grants this user, for build reports and tests. */
+  get unitsPerMinute(): number {
+    return this.#unitsPerMinute;
   }
 
   async #request(path: string, resource: GmailResourceKind, parameters?: URLSearchParams): Promise<Response> {
@@ -206,7 +256,10 @@ export class GmailClient {
         await this.#sleep(exponentialBackoffMs(attempt));
         continue;
       }
-      if (response.ok) return response;
+      if (response.ok) {
+        this.#raiseCapAfterQuietSuccesses();
+        return response;
+      }
       if (response.status === 401 && !renewedToken) {
         // The access token expired while this build was running: renew once and repeat the request.
         renewedToken = true;
@@ -219,7 +272,7 @@ export class GmailClient {
       if (!retryable || attempt + 1 >= (quota ? QUOTA_ATTEMPTS : ATTEMPTS))
         throw new GmailRequestError(message, response.status, quota);
       if (quota) {
-        await this.#pauseForQuotaWindow();
+        await this.#learnCapFromQuotaAnswer(response, attempt);
         continue;
       }
       await this.#sleep(retryDelayMs(response, attempt));

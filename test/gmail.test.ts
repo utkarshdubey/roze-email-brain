@@ -97,6 +97,8 @@ test("client pages ids and parses full threads and metadata", async () => {
       messages: { requests: 0, quotaUnits: 0 },
       threads: { requests: 0, quotaUnits: 0 },
     },
+    unitsPerMinute: 12_750,
+    unitsPerMinuteCeiling: 12_750,
     elapsedMs: 0,
   });
   assert.deepEqual(await client.listThreadIds("in:sent"), ["t1", "t2", "t3"]);
@@ -118,6 +120,8 @@ test("client pages ids and parses full threads and metadata", async () => {
       messages: { requests: 1, quotaUnits: 5 },
       threads: { requests: 1, quotaUnits: 10 },
     },
+    unitsPerMinute: 12_750,
+    unitsPerMinuteCeiling: 12_750,
     elapsedMs: 25,
   });
 });
@@ -180,12 +184,15 @@ test("message listings carry thread ids and a single-message thread reads as one
   assert.equal(urls.at(-1)?.searchParams.get("format"), "full");
 });
 
-test("quota 403 is retried with seconds of backoff and every request is throttled", async () => {
+test("a quota 403 teaches the client its real minute cap and the window waits instead of a full stop", async () => {
   let calls = 0;
+  let clock = 1_000_000;
   const delays: number[] = [];
   const client = new GmailClient("token", {
+    now: () => clock,
     sleep: async (ms) => {
       delays.push(ms);
+      clock += ms;
     },
     fetch: async () => {
       calls += 1;
@@ -197,12 +204,15 @@ test("quota 403 is retried with seconds of backoff and every request is throttle
       return Response.json({ emailAddress: "me@example.com", historyId: "1" });
     },
   });
+  const fullCap = client.unitsPerMinute;
   assert.equal((await client.getProfile()).emailAddress, "me@example.com");
   assert.equal(calls, 2);
   assert.ok(
-    delays.some((ms) => ms >= 5_000),
-    "quota backoff pauses the client until the minute window resets",
+    delays.every((ms) => ms < 10_000),
+    `a quota answer costs seconds, not the old 61 s full stop: ${delays.join(", ")}`,
   );
+  // One profile unit was in the window when Gmail refused, so the learned cap is the floor, not the ceiling.
+  assert.ok(client.unitsPerMinute < fullCap / 5, `the cap was learned from the window: ${client.unitsPerMinute}`);
   await Promise.all([client.getProfile(), client.getProfile()]);
   assert.deepEqual(
     { requests: client.getUsage().requests, quotaUnits: client.getUsage().quotaUnits },
@@ -212,6 +222,14 @@ test("quota 403 is retried with seconds of backoff and every request is throttle
   assert.ok(
     delays.some((ms) => ms > 0 && ms < 5_000),
     "request spacing",
+  );
+  // The window is now full at the floor cap: the next request waits until the oldest unit ages out.
+  const before = delays.length;
+  const cap = Math.ceil(client.unitsPerMinute);
+  for (let index = 0; index < cap; index += 1) await client.getProfile();
+  assert.ok(
+    delays.slice(before).some((ms) => ms > 1_000 && ms <= 60_000),
+    "a full window waits for old units to expire, bounded by one minute",
   );
 });
 
@@ -239,6 +257,8 @@ test("usage counts a transport failure when fetch was invoked", async () => {
       messages: { requests: 0, quotaUnits: 0 },
       threads: { requests: 0, quotaUnits: 0 },
     },
+    unitsPerMinute: 12_750,
+    unitsPerMinuteCeiling: 12_750,
     elapsedMs: 8,
   });
 });

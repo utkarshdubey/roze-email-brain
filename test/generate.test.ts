@@ -26,6 +26,8 @@ class FakeGmail implements GmailReader {
         threads: { requests: 2, quotaUnits: 20 },
       },
       elapsedMs: 255_000,
+      unitsPerMinute: 12_750,
+      unitsPerMinuteCeiling: 12_750,
     };
   }
   async getProfile() {

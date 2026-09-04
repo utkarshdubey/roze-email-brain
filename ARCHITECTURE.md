@@ -71,8 +71,9 @@ over the account cache in `ingest/cache.ts`; `ingest/engagement.ts` reduces Gmai
 to a per-sender score. `ingest/promote.ts` owns sender promotion. Promotion groups headers by sender and
 includes opened, replied, important, and starred counts; its strict response chooses `all`, `recent`,
 `latest`, or `ignore`. Local limits cap those choices at 25, 5 within 180 days, and 1, and automated senders
-cannot receive `all`. The Gmail client paces requests below the per-user quota, retries bounded network,
-429, 5xx, and quota-related 403 failures, and counts each outbound attempt and its quota units by resource.
+cannot receive `all`. The Gmail client paces requests under a per-minute unit cap it learns from Gmail's
+own quota answers (a sliding window, never a full stop), retries bounded network, 429, 5xx, and
+quota-related 403 failures, and counts each outbound attempt and its quota units by resource.
 
 `src/memory/extractThread.ts` makes one structured extraction per full-read thread. Participated
 threads can yield eight items; inbox-only promoted threads expose 1,500 body characters and can
