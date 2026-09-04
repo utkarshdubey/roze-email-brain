@@ -9,6 +9,7 @@ export interface GenerationOptions {
   noSynthesize: boolean;
   noSkim: boolean;
   publishOnce: boolean;
+  recentMonths: number;
   budget?: number;
 }
 
@@ -20,13 +21,18 @@ export interface BuildStatus {
 }
 
 /** How a not-yet-run phase is described to whoever queries the brain in the meantime. */
-const PENDING: Record<Phase, string> = {
-  "full-read": "threads you took part in",
-  "fast-inbox": "inbox threads from senders you never replied to",
-  "complete-inbox": "the complete two-year inbox index and automated senders (banks, tools, recruiting systems)",
-  "body-evidence": "raw bodies of the remaining inbox threads (until then, use read_email for header rows)",
-  concepts: "projects and interests",
-};
+function pendingDescription(phase: Phase, recentMonths: number): string {
+  if (phase === "full-read") return "threads you took part in";
+  if (phase === "fast-inbox") return "inbox threads from senders you never replied to";
+  if (phase === "complete-inbox") {
+    const window = recentMonths === 24 ? "two-year" : `${recentMonths}-month`;
+    return `the complete ${window} inbox index and automated senders (banks, tools, recruiting systems)`;
+  }
+  if (phase === "body-evidence") {
+    return "raw bodies of the remaining inbox threads (until then, use read_email for header rows)";
+  }
+  return "projects and interests";
+}
 
 /** Bodies come first: receipts the promotion tier never read still feed recurring interests. */
 export function planPhases(options: GenerationOptions): Phase[] {
@@ -37,12 +43,12 @@ export function planPhases(options: GenerationOptions): Phase[] {
   ];
 }
 
-export function buildStatus(plan: readonly Phase[], current: Phase): BuildStatus {
+export function buildStatus(plan: readonly Phase[], current: Phase, recentMonths = 24): BuildStatus {
   const index = plan.indexOf(current);
   return {
     phase: index + 1,
     phases: plan.length,
     complete: index === plan.length - 1,
-    pending: plan.slice(index + 1).map((phase) => PENDING[phase]),
+    pending: plan.slice(index + 1).map((phase) => pendingDescription(phase, recentMonths)),
   };
 }

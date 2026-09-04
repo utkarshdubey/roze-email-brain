@@ -1,6 +1,6 @@
 // What `generate` needs out of Gmail and in what order: full reads for mail the user took part in (sent,
-// starred, or pulled on demand), and a two-year skim that finds the rest — headers in the fast pass, one
-// full read per uncovered thread in the backfill. Both are resumable and deterministically ordered.
+// starred, or pulled on demand), and a bounded recent skim that finds the rest — headers in the fast pass,
+// one full read per uncovered thread in the backfill. Both are resumable and deterministically ordered.
 
 import { mapAtLimitedConcurrency, type PipelineContext } from "../context.js";
 import { isExhaustedQuota, isSkippableGmailItem, type GmailProfile, type ListedMessage } from "../gmail/client.js";
@@ -18,7 +18,8 @@ import {
 const FULL_READ_QUERIES = ["in:sent -in:chats", "is:starred -in:chats"];
 // Updates and Forums stay in — acceptance notices, applicant-tracking offers, and receipts land there;
 // Promotions and Social are marketing. Chat conversations list as messages but cannot be fetched.
-const SKIM_QUERY = "newer_than:2y -in:sent -in:chats -category:promotions -category:social";
+export const DEFAULT_RECENT_MONTHS = 24;
+const SKIM_FILTERS = "-in:sent -in:chats -category:promotions -category:social";
 /**
  * Each already fails looksLikeAHuman, so excluding them at the listing keeps the same senders while
  * fetching half as many headers. Tokens that also appear in human display names are absent.
@@ -53,7 +54,7 @@ interface ThreadIngestClient {
   listMessages?(query: string, limit?: number): Promise<ListedMessage[]>;
   fetchSingleMessageThread?(messageId: string, threadId: string): Promise<EmailThread>;
 }
-/** The two-year skim as Gmail lists it: every thread and the message ids the query matched inside it. */
+/** The configured recent skim as Gmail lists it: every thread and the message ids matched inside it. */
 export type SkimListing = ReadonlyMap<string, readonly string[]>;
 /**
  * One listing pass (five units per 500 messages) instead of a thread listing, because it also says how many
@@ -62,13 +63,16 @@ export type SkimListing = ReadonlyMap<string, readonly string[]>;
  * are always read in full. A message outside the query (older than the window, in an excluded category) is not
  * fetched with a single-message read; `read_email` still fetches such a thread whole.
  */
-export async function listSkimThreads(client: ThreadIngestClient): Promise<SkimListing> {
+export async function listSkimThreads(
+  client: ThreadIngestClient,
+  recentMonths = DEFAULT_RECENT_MONTHS,
+): Promise<SkimListing> {
   const listing = new Map<string, string[]>();
   if (!client.listMessages) {
-    for (const id of await client.listThreadIds(SKIM_QUERY, 100_000)) listing.set(id, []);
+    for (const id of await client.listThreadIds(buildSkimWindowQuery(recentMonths), 100_000)) listing.set(id, []);
     return listing;
   }
-  for (const row of await client.listMessages(SKIM_QUERY, 100_000)) {
+  for (const row of await client.listMessages(buildSkimWindowQuery(recentMonths), 100_000)) {
     if (!row.threadId) continue;
     listing.set(row.threadId, [...(listing.get(row.threadId) ?? []), row.id]);
   }
@@ -172,9 +176,30 @@ export function learnAutomatedDomains(rows: readonly MessageHeader[]): string[] 
     .map(([domain]) => domain);
 }
 
-export function buildSkimQuery(excludedDomains: readonly string[] = []): string {
+function requireRecentMonths(recentMonths: number): void {
+  if (!Number.isSafeInteger(recentMonths) || recentMonths <= 0) {
+    throw new RangeError("recentMonths must be a positive integer");
+  }
+}
+
+export function describeRecentWindow(recentMonths: number): string {
+  requireRecentMonths(recentMonths);
+  if (recentMonths === DEFAULT_RECENT_MONTHS) return "last two years";
+  return recentMonths === 1 ? "last month" : `last ${recentMonths} months`;
+}
+
+function buildSkimWindowQuery(recentMonths: number): string {
+  requireRecentMonths(recentMonths);
+  const age = recentMonths === DEFAULT_RECENT_MONTHS ? "newer_than:2y" : `newer_than:${recentMonths}m`;
+  return `${age} ${SKIM_FILTERS}`;
+}
+
+export function buildSkimQuery(
+  recentMonths = DEFAULT_RECENT_MONTHS,
+  excludedDomains: readonly string[] = [],
+): string {
   return [
-    SKIM_QUERY,
+    buildSkimWindowQuery(recentMonths),
     ...AUTOMATED_SENDER_TERMS.map((term) => `-from:${term}`),
     ...excludedDomains.map((domain) => `-from:${domain}`),
   ].join(" ");
@@ -254,8 +279,10 @@ export async function fetchRecentInboxHeaders(
   context: PipelineContext,
   mode: "fast" | "complete" = "fast",
   listing?: SkimListing,
+  recentMonths = DEFAULT_RECENT_MONTHS,
 ): Promise<MessageHeader[]> {
-  // A cached row without a snippet is refetched; a metadata read is free and the index needs the snippet.
+  requireRecentMonths(recentMonths);
+  // A cached row without a snippet is refetched because the index needs the preview.
   const byId = new Map(
     readCachedHeaderRows(context.paths, (message) => context.log(message))
       .filter((row) => row.snippet !== undefined)
@@ -267,6 +294,8 @@ export async function fetchRecentInboxHeaders(
       byId.set(row.id, row);
     }
   };
+  const rowsForMessageIds = (ids: ReadonlySet<string>): MessageHeader[] =>
+    [...ids].flatMap((id) => byId.get(id) ?? []);
   /** Threads the fast pass already indexed keep their rows; the rest are read once, in full. */
   const backfillThreads = async (skim: SkimListing, label: string): Promise<void> => {
     const indexed = new Set([...byId.values()].map((row) => row.threadId));
@@ -285,18 +314,31 @@ export async function fetchRecentInboxHeaders(
       byId.set(row.id, row);
     }
   };
+  let selected: MessageHeader[];
   if (mode === "fast") {
-    await fetchUncached(await client.listMessageIds(buildSkimQuery(), SKIM_SAMPLE), "skim sample");
-    const excluded = learnAutomatedDomains([...byId.values()]);
+    const selectedIds = new Set(await client.listMessageIds(buildSkimQuery(recentMonths), SKIM_SAMPLE));
+    await fetchUncached([...selectedIds], "skim sample");
+    const sample =
+      recentMonths === DEFAULT_RECENT_MONTHS ? [...byId.values()] : rowsForMessageIds(selectedIds);
+    const excluded = learnAutomatedDomains(sample);
     context.log(
       `  skim excludes ${AUTOMATED_SENDER_TERMS.length} automated sender terms and ` +
         `${excluded.length} learned bulk domains`,
     );
-    await fetchUncached(await client.listMessageIds(buildSkimQuery(excluded), 100_000), "skim");
+    const ids = await client.listMessageIds(buildSkimQuery(recentMonths, excluded), 100_000);
+    ids.forEach((id) => selectedIds.add(id));
+    await fetchUncached(ids, "skim");
+    selected = recentMonths === DEFAULT_RECENT_MONTHS ? [...byId.values()] : rowsForMessageIds(selectedIds);
   } else {
-    await backfillThreads(listing ?? (await listSkimThreads(client)), "skim backfill");
+    const skim = listing ?? (await listSkimThreads(client, recentMonths));
+    await backfillThreads(skim, "skim backfill");
+    const selectedThreads = new Set(skim.keys());
+    selected =
+      recentMonths === DEFAULT_RECENT_MONTHS
+        ? [...byId.values()]
+        : [...byId.values()].filter((row) => selectedThreads.has(row.threadId));
   }
-  return collapseHeadersToThreads([...byId.values()]).sort(
+  return collapseHeadersToThreads(selected).sort(
     (a, b) => b.timestamp - a.timestamp || a.threadId.localeCompare(b.threadId),
   );
 }

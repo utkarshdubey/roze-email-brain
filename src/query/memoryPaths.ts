@@ -19,7 +19,7 @@ function pathLooksAllowlisted(path: string): boolean {
   if (traversalOrHidden) return false;
   if (parts.length === 1) return path === "INDEX.md";
   if (![".md", ".txt"].includes(extname(path).toLowerCase())) return false;
-  if ([...RUBRIC_DIRECTORIES, "threads"].includes(parts[0]!)) return parts.length === 2;
+  if ([...RUBRIC_DIRECTORIES, "threads", "concepts"].includes(parts[0]!)) return parts.length === 2;
   return parts[0] === "evidence" && (parts.length === 2 || (parts.length === 3 && parts[1] === "threads"));
 }
 

@@ -29,7 +29,7 @@ sent in or starred, for all time, and extracts each complete thread as one unit.
 
 Most inbox mail is automated. Running every body through a model would cost more and make the memory
 noisier, while keeping only conversations would miss receipts, account notices, and inbound
-opportunities. The two-year inbox therefore has separate costs:
+opportunities. The recent inbox window (24 months by default) therefore has separate costs:
 
 - every header and Gmail snippet becomes a searchable index row;
 - a sender-level model promotes a bounded subset for extraction;
@@ -61,8 +61,12 @@ plausible continuation is not proof that a commitment closed.
 
 Projects and interests span threads, but a mailbox-wide prompt is too large and encourages unrelated
 efforts to merge. Roze first makes body-free cards, adds a small life-domain taxonomy, and builds
-bounded entity and domain clusters. The judge can cite only exact thread/day pairs supplied in its
-own cluster.
+bounded entity, domain, and topic clusters. Topics normalize only generic function words and combine
+the model's short label with subject vocabulary; Jaccard union recovers recurring efforts that share
+neither one counterparty nor one broad domain. Oversized clusters split by year, preserving older efforts
+without increasing the judge request cap. The judge can cite only exact thread/day pairs supplied in its
+own cluster. Topics hash into a separate eight-bucket namespace, leaving the original 24 entity/domain
+cache inputs stable.
 
 Model output then passes deterministic gates in `src/concepts/applyGates.ts`. The important reasons
 for those checks are:
@@ -84,6 +88,11 @@ demotes non-projects, groups interests, and writes narratives. It may also use c
 recurring merchants parsed from raw receipts. Its references are limited to member evidence and
 explicit context, unmentioned concepts survive unchanged, every verdict is logged, and the same
 gates run again.
+
+Named counters make aggregate failures measurable but used to hide the fate of an individual proposal.
+The proposal trace now records source cluster and citations, both gate/dedupe passes, the review verdict,
+and the final file or drop stage. It is published as Markdown for inspection and as structured JSON for
+tools. This metadata stays outside every model input and does not alter accepted lists or counter values.
 
 ## Plain files and derived ranked retrieval
 
@@ -117,7 +126,7 @@ repeating loop stops.
 ## Why every body is stored but only selected mail is extracted
 
 Gmail reads and model reads are different costs. The final body-evidence phase therefore stores raw
-text for every remaining inbox thread in the two-year window, while extraction remains limited to
+text for every remaining inbox thread in the configured recent window, while extraction remains limited to
 participated, starred, on-demand, and promoted threads. On the public Enron inbox, seven of twelve
 retrieval misses existed only as subjects and snippets. Storing all bodies took the fourteen
 previously missed questions from 4 to 9 correct, including all seven header-only misses, at zero
@@ -174,6 +183,21 @@ needs the recurring merchants parsed from every stored body. `buildConcepts` is 
 Each phase publishes a whole staged tree as soon as it is useful; a second terminal can query it and
 never sees half a generation. `--publish-once` changes only when swapping occurs, which is preferable
 during a rebuild when the old complete brain is more useful than a new partial one.
+
+## Why user behaviour orders recent ingestion
+
+Categories describe mail, not whether the user valued it. Cached headers already carry stronger personal
+signals: opened, important, starred, retained in the inbox, and whether the thread belongs to the all-time
+participated set. Roze combines their per-sender shares as `(4 × replied + 2 × starred + 2 × important +
+opened + kept in inbox) / 10`, then downloads body-only threads by score, recency, and id. The promotion
+sender line receives the same counts. Because that one allowed prompt sentence changes paid inputs,
+`promotion.json` now records sender-line format 2 and older cumulative decisions warn without being discarded.
+
+`--recent <months>` changes only the skim listings; participated, starred, and on-demand mail stays all-time.
+The default retains the existing 24-month query and Markdown bytes, while custom coverage is explicit in
+metadata and headings. Every outbound Gmail attempt is also counted by resource kind and quota units in the
+final summary. These are instrumentation and prioritization mechanisms; their real-mailbox value remains to
+be measured by the coordinated cold-Gmail comparison and promotion audit.
 
 ## What the measurements changed
 

@@ -12,6 +12,7 @@ import {
   reject,
   type Citation,
   type ConceptReviewLog,
+  type ConceptReviewOutcome,
   type EvidenceRow,
   type Interest,
   type MerchantRow,
@@ -60,7 +61,9 @@ interface VerdictHandlers<Concept, Entry extends Verdict, Proposal> {
   prefix: string;
   counter: string;
   nameOf: (concept: Concept) => string;
+  nameOfProposal: (proposal: Proposal) => string;
   keep: (concept: Concept) => Proposal;
+  verdict: (entry: Entry, members: readonly Concept[]) => ConceptReviewOutcome["verdict"];
   /** Whether the concept's own evidence agrees with the stated demotion reason. */
   supported: (concept: Concept, reason: string) => boolean;
   /** Citable refs this entry named beyond its members: an open loop, a merchant's receipts. */
@@ -82,48 +85,70 @@ function applyVerdicts<Concept extends { evidence: EvidenceRow<string>[] }, Entr
   demotions: readonly Demotion[],
   log: ConceptReviewLog,
   handlers: VerdictHandlers<Concept, Entry, Proposal>,
-): { proposals: Proposal[]; log: ConceptReviewLog } {
+): { proposals: Proposal[]; log: ConceptReviewLog; outcomes: ConceptReviewOutcome[] } {
   const counts = log.rejections;
-  const byId = new Map(concepts.map((concept, index) => [`${handlers.prefix}${index + 1}`, concept]));
+  const byId = new Map(
+    concepts.map((concept, inputIndex) => [`${handlers.prefix}${inputIndex + 1}`, { concept, inputIndex }]),
+  );
   const consumed = new Set<string>();
   const proposals: Proposal[] = [];
+  const outcomes: ConceptReviewOutcome[] = [];
   for (const demotion of demotions) {
-    const concept = byId.get(demotion.id);
-    if (!concept || consumed.has(demotion.id)) {
+    const indexed = byId.get(demotion.id);
+    if (!indexed || consumed.has(demotion.id)) {
       reject(counts, "review_conflicting_verdict");
       continue;
     }
     // A demotion is a deletion, so it must be checkable against the concept's own rows.
-    if (!handlers.supported(concept, demotion.reason)) {
+    if (!handlers.supported(indexed.concept, demotion.reason)) {
       reject(counts, "review_demotion_unsupported");
       continue;
     }
     consumed.add(demotion.id);
-    log.demoted.push({ name: handlers.nameOf(concept), reason: demotion.reason });
+    const name = handlers.nameOf(indexed.concept);
+    log.demoted.push({ name, reason: demotion.reason });
+    outcomes.push({ inputIndex: indexed.inputIndex, name, verdict: "demoted", reason: demotion.reason });
     reject(counts, `${handlers.counter}_${demotion.reason}`);
   }
   for (const entry of entries) {
-    const members = claimMembers(entry, byId, consumed, counts);
-    if (!members.length && entry.id !== "new") continue;
+    const claimed = claimMembers(entry, byId, consumed, counts);
+    if (!claimed.length && entry.id !== "new") continue;
+    const members = claimed.map((member) => member.concept);
     const allowed = new Set([...handlers.extraRefs(entry), ...members.flatMap((member) => member.evidence.map(ref))]);
     const evidence = collectEntryEvidence(entry, members, allowed, counts);
-    proposals.push(handlers.build(entry, members, evidence.slice(0, MAX_EVIDENCE), allowed));
+    const proposal = handlers.build(entry, members, evidence.slice(0, MAX_EVIDENCE), allowed);
+    const outputIndex = proposals.length;
+    proposals.push(proposal);
+    const verdict = handlers.verdict(entry, members);
+    const into = handlers.nameOfProposal(proposal);
+    for (const member of claimed) {
+      outcomes.push({
+        inputIndex: member.inputIndex,
+        name: handlers.nameOf(member.concept),
+        verdict,
+        ...(verdict === "kept" ? {} : { into }),
+        outputIndex,
+      });
+    }
   }
-  byId.forEach((concept, id) => {
+  byId.forEach(({ concept, inputIndex }, id) => {
     if (!consumed.has(id)) {
+      const outputIndex = proposals.length;
       proposals.push(handlers.keep(concept));
+      outcomes.push({ inputIndex, name: handlers.nameOf(concept), verdict: "kept", outputIndex });
     }
   });
-  return { proposals, log };
+  outcomes.sort((left, right) => left.inputIndex - right.inputIndex);
+  return { proposals, log, outcomes };
 }
 /** An id may be folded into one entry only; a second claim is a conflicting verdict, not a merge. */
 function claimMembers<Concept, Entry extends Verdict>(
   entry: Entry,
-  byId: ReadonlyMap<string, Concept>,
+  byId: ReadonlyMap<string, { concept: Concept; inputIndex: number }>,
   consumed: Set<string>,
   counts: RejectionCounts,
-): Concept[] {
-  const members: Concept[] = [];
+): Array<{ concept: Concept; inputIndex: number }> {
+  const members: Array<{ concept: Concept; inputIndex: number }> = [];
   for (const id of new Set(entry.id === "new" ? entry.members : [entry.id, ...entry.members])) {
     if (consumed.has(id)) {
       reject(counts, "review_conflicting_verdict");
@@ -197,7 +222,14 @@ export function applyProjectReview(
     prefix: "P",
     counter: "project_demoted",
     nameOf: (project) => project.name,
+    nameOfProposal: (project) => cleanText(project.name, 160),
     keep: stripProject,
+    verdict: (entry, members) =>
+      entry.tracks.length && members.length
+        ? "umbrella"
+        : members.length > 1 || (entry.id === "new" && members.length)
+          ? "merged"
+          : "kept",
     // A month-long effort is not a single incident, whatever the model says.
     supported: (project, reason) =>
       reason !== "single_incident_or_ticket" || spanDays(project.evidence) < EPISODE_DAYS,
@@ -235,7 +267,12 @@ export function applyInterestReview(
     prefix: "I",
     counter: "interest_dropped",
     nameOf: (interest) => interest.topic,
+    nameOfProposal: (interest) => cleanText(interest.topic, 160),
     keep: stripInterest,
+    verdict: (entry, members) =>
+      members.length > 1 || chosenMerchants(entry).length || (entry.id === "new" && members.length)
+        ? "merged"
+        : "kept",
     // Marketing-only means the user never wrote back; a single episode means it all happened within a month.
     supported: (interest, reason) =>
       reason === "marketing_only" ? interest.engagement === "passive" : spanDays(interest.evidence) < EPISODE_DAYS,
@@ -303,6 +340,18 @@ export async function reviewConcepts(
   const extra = new Set<string>();
   let reviewedProjects = projects.map(stripProject);
   let reviewedInterests = interests.map(stripInterest);
+  let projectOutcomes: ConceptReviewOutcome[] = projects.map((project, inputIndex) => ({
+    inputIndex,
+    name: project.name,
+    verdict: "kept",
+    outputIndex: inputIndex,
+  }));
+  let interestOutcomes: ConceptReviewOutcome[] = interests.map((interest, inputIndex) => ({
+    inputIndex,
+    name: interest.topic,
+    verdict: "kept",
+    outputIndex: inputIndex,
+  }));
   context.log("reviewing", 0, 2);
   if (projects.length) {
     const request = buildProjectReviewRequest(projects, loops, userEmail, context.today);
@@ -312,6 +361,7 @@ export async function reviewConcepts(
     );
     const applied = applyProjectReview(projects, request.loops, document);
     reviewedProjects = applied.proposals;
+    projectOutcomes = applied.outcomes;
     absorb(applied.log, request.truncated);
     for (const loop of request.loops) {
       extra.add(loop.threadId);
@@ -326,6 +376,7 @@ export async function reviewConcepts(
     );
     const applied = applyInterestReview(interests, request.merchants, document);
     reviewedInterests = applied.proposals;
+    interestOutcomes = applied.outcomes;
     absorb(applied.log, request.truncated);
     for (const merchant of request.merchants) {
       for (const example of merchant.examples) {
@@ -334,5 +385,11 @@ export async function reviewConcepts(
     }
   }
   context.log("reviewing", 2, 2);
-  return { projects: reviewedProjects, interests: reviewedInterests, log, extraThreadIds: [...extra].sort() };
+  return {
+    projects: reviewedProjects,
+    interests: reviewedInterests,
+    log,
+    extraThreadIds: [...extra].sort(),
+    outcomes: { projects: projectOutcomes, interests: interestOutcomes },
+  };
 }

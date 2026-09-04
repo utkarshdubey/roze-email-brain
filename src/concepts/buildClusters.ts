@@ -1,9 +1,10 @@
 // The second concept stage, and the reason the pipeline is cluster-first: the judge never sees the whole
 // mailbox, only one small, coherent group of threads at a time — an ENTITY cluster around one recurring
-// person or organization, or a DOMAIN cluster around one life-domain tag. Both are formed with no model.
+// counterparty, a DOMAIN cluster around one life-domain tag, or a TOPIC cluster around related labels.
 import { compareText, createSlug, normalizeNameKey, organizationNamesAreCompatible } from "../shared/text.js";
 import type { DomainTags, ThreadCard, ThreadCluster } from "../types.js";
 import { LIFE_DOMAINS } from "./tagLifeDomains.js";
+import { formTopicGroups } from "./topicClusters.js";
 
 /** The cap is what one judge request may see; the minimum keeps one-off mail from becoming a cluster. */
 const ENTITY_CAP = 30;
@@ -180,7 +181,7 @@ function formEntityGroups(cards: readonly ThreadCard[]): EntityGroup[] {
   return [...membersByRoot.values()].flatMap((members) => chooseAnchorAndAliases(members) ?? []);
 }
 
-// CLUSTER ASSEMBLY — entity groups first, then life domains, each capped to one judge request.
+// CLUSTER ASSEMBLY — entity, life-domain, and topic groups, each capped to one judge request.
 
 function compareCardsByPriority(left: ThreadCard, right: ThreadCard): number {
   return (
@@ -205,7 +206,8 @@ export function buildClusters(cards: readonly ThreadCard[], tags: DomainTags): T
     return key;
   }
   function addCluster(kind: ThreadCluster["kind"], anchor: string, aliases: string[], ids: ReadonlySet<string>): void {
-    const [cap, minimumEngaged] = kind === "entity" ? [ENTITY_CAP, ENTITY_MINIMUM] : [DOMAIN_CAP, DOMAIN_MINIMUM];
+    const [cap, minimumEngaged] =
+      kind === "domain" ? [DOMAIN_CAP, DOMAIN_MINIMUM] : [ENTITY_CAP, ENTITY_MINIMUM];
     const memberCards = [...ids].flatMap((id) => byId.get(id) ?? []);
     if (memberCards.filter((card) => card.engaged).length < minimumEngaged) return;
     clusters.push({
@@ -216,7 +218,15 @@ export function buildClusters(cards: readonly ThreadCard[], tags: DomainTags): T
       threadIds: memberCards.sort(compareCardsByPriority).slice(0, cap).map((card) => card.threadId),
     });
   }
-  for (const group of formEntityGroups(cards)) addCluster("entity", group.anchor, group.aliases, group.threads);
+  for (const group of formEntityGroups(cards)) {
+    if (group.threads.size <= ENTITY_CAP) {
+      addCluster("entity", group.anchor, group.aliases, group.threads);
+      continue;
+    }
+    for (const [year, ids] of splitByYear(group.threads, byId)) {
+      addCluster("entity", `${group.anchor} ${year}`, group.aliases, ids);
+    }
+  }
   for (const [domain, members] of collectDomainMembers(tags, byId)) {
     if (members.size <= DOMAIN_CAP) {
       addCluster("domain", domain, [], members);
@@ -225,6 +235,15 @@ export function buildClusters(cards: readonly ThreadCard[], tags: DomainTags): T
     // A domain larger than one request is judged per year, so a multi-year domain keeps its recent efforts
     // instead of losing everything past the cap.
     for (const [year, ids] of splitByYear(members, byId)) addCluster("domain", `${domain} ${year}`, [], ids);
+  }
+  for (const group of formTopicGroups(cards, tags)) {
+    if (group.threads.size <= ENTITY_CAP) {
+      addCluster("topic", group.anchor, group.aliases, group.threads);
+      continue;
+    }
+    for (const [year, ids] of splitByYear(group.threads, byId)) {
+      addCluster("topic", `${group.anchor} ${year}`, group.aliases, ids);
+    }
   }
   return clusters.sort(
     (a, b) => compareText(a.kind, b.kind) || b.threadIds.length - a.threadIds.length || compareText(a.key, b.key),

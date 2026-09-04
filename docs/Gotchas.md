@@ -6,7 +6,9 @@ tags: [operations]
 
 - Gmail answers `400 Precondition check failed` for Google Chat items that listings still return: skip them
   (`-in:chats` on listings; skippable per-thread errors) instead of aborting a fetch.
-- Gmail per-minute quota: a 403 pauses every worker for 61 s; exhausted retries skip the thread with a
+- Gmail per-minute quota: a 403 used to pause every worker for 61 s; on an account whose real cap is ~1,500
+  units a minute that ran a cold build at 4 reads/s (30 min for 4,600 threads). The client now learns the cap
+  from a sliding one-minute window ([[Costs and caching]]). Exhausted retries still skip the thread with a
   warning; the next generate resumes from the cache boundary.
 - Windows refuses to rename a directory another process holds open (EPERM): the publish swap retries for
   about six seconds and rolls back on failure.
@@ -36,5 +38,7 @@ tags: [operations]
 - In zsh, `read … path` inside a loop clobbers `PATH`.
 - The mini model at medium reasoning can spend its whole output cap reasoning and return nothing; the
   cached-call layer retries once at low.
+- Promotion decisions are cumulative but their sender-line input is paid and versioned. A format warning
+  means the old decisions remain active; move the named `promotion.json` aside before re-auditing them.
 - `codex exec` here: `--skip-git-repo-check -m <model> --config model_reasoning_effort=<level> --sandbox
   workspace-write -C <dir> "<prompt>" </dev/null` (no `--full-auto`).

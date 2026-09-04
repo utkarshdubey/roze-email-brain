@@ -42,22 +42,28 @@ npm run roze -- prompt "What projects am I working on, and where does each stand
 `generate` shows progress and publishes up to five complete snapshots:
 
 1. participated or starred threads, extracted into people, organizations, loops, and summaries;
-2. a people-first two-year inbox skim, with useful senders promoted to full reads;
-3. the complete two-year inbox index and any additional promoted senders;
+2. a people-first recent inbox skim (24 months by default), with useful senders promoted to full reads;
+3. the complete recent-window inbox index and any additional promoted senders;
 4. raw bodies for the remaining indexed threads, stored as searchable evidence but not extracted;
-5. projects and interests synthesized across threads, gated, reviewed as whole lists, gated again,
-   and linked to related threads.
+5. projects and interests synthesized across entity, domain, and topic clusters; gated, reviewed as whole
+   lists, gated again, linked to related threads, and accompanied by a proposal-fate trace.
+
+Opened, replied, important, starred, and inbox-retention signals form a deterministic per-sender score.
+Promotion sees the raw counts, and body-only downloads use the score before recency so an interrupted build
+caches the mail the user engaged with first. If generate warns that `promotion.json` used an older sender-line
+format, move the named file aside before rejudging those cumulative decisions.
 
 `INDEX.md` and `meta.json` identify the current phase. Every publication is staged and swapped as
 one tree; a failed partial swap restores the prior tree. `--publish-once` delays publication until
 the final phase. On Windows, transient rename failures are retried because scanners and sync tools
 can briefly hold newly written files.
 
-Generate options are `--publish-once`, `--no-promote`, `--no-synthesize`, `--no-skim`, and
-`--budget USD`. `prompt` accepts `--cap N` and `--quiet`. Before a paid stage, the CLI prints its
-cache-aware expected cost; the budget is enforced both before the stage and after each cached
-response. Gmail and model results live under `brain/.cache/<account>/`, so unchanged rebuilds make
-no model calls.
+Generate options are `--publish-once`, `--no-promote`, `--no-synthesize`, `--no-skim`, `--recent MONTHS`
+(skim tiers only; default 24), and `--budget USD`. `prompt` accepts `--cap N` and `--quiet`. Before a paid
+stage, the CLI prints its cache-aware expected cost; the budget is enforced both before the stage and after
+each cached response. The final summary reports model usage plus Gmail requests, quota units, resource
+counts, and elapsed Gmail time. Gmail and model results live under `brain/.cache/<account>/`, so unchanged
+rebuilds make no model calls.
 
 `prompt` can only call three tools: literal-safe, FTS5-ranked `search_memory`, allowlisted
 `read_memory`, and read-only `read_email` for an indexed thread whose body is not stored yet. The
@@ -98,11 +104,12 @@ brain/
   organizations/INDEX.md, organizations/ALL.md, organizations/<slug>.md
   projects/INDEX.md, projects/<slug>.md
   interests/INDEX.md, interests/<slug>.md
+  concepts/TRACE.md                    proposal lineage through gates, review, and final files
   open_loops/INDEX.md
   threads/INDEX.md, threads/threads-<year>.md
   evidence/INDEX.md
   evidence/threads-<year>.md          full-read thread rows
-  evidence/inbox-<year>.md            two-year inbox rows, marked body or header
+  evidence/inbox-<year>.md            recent-window inbox rows, marked body or header
   evidence/transactions-<year>.md     parsed merchant, kind, amount, and currency rows
   evidence/threads/<id>.md             authoritative raw messages
   meta.json, concepts.json
@@ -146,8 +153,8 @@ larger model paid for itself. Mailbox mix, cache state, and overrides change the
 The two flows are:
 
 ```text
-Gmail → selection → extraction → entities/loops → cards → domain tags → clusters → judge → gates
-      → whole-list review → gates → related threads → staged files
+Gmail → selection → extraction → entities/loops → cards → domain/topic tags → three cluster families
+      → judge → gates → whole-list review → gates → related threads + proposal trace → staged files
 
 question → search_memory/read_memory/read_email → citation audit → answer
 ```
@@ -166,7 +173,7 @@ npm test
 npm run validate
 ```
 
-The 80 tests use injected models, fake HTTP, and synthetic search indexes. `validateCitations.ts`
+The 97 tests use injected models, fake HTTP, and synthetic search indexes. `validateCitations.ts`
 checks every generated citation; `validateConcepts.ts` replays the production gates from caches and
 compares a temporary render byte-for-byte. Both are offline. `bench/rebuildConcepts.ts` can preview a
 cache-backed concept rebuild. `bench/evalAgent.ts`, `bench/auditPromotion.ts --second-opinion`, and

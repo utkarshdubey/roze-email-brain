@@ -6,16 +6,35 @@ import test from "node:test";
 
 import { PUBLISH_TARGETS, resolveBrainPaths } from "../src/brain/storage.js";
 import { runGenerateCommand } from "../src/commands/generate.js";
+import type { GmailUsageSnapshot } from "../src/gmail/client.js";
 import type { GmailReader } from "../src/ingest/mail.js";
 import type { CallModel } from "../src/llm/models.js";
 import type { EmailThread, MessageHeader } from "../src/types.js";
 import { message, USER } from "./helpers.js";
 
 class FakeGmail implements GmailReader {
+  readonly queries: string[] = [];
+
+  getUsage(): GmailUsageSnapshot {
+    return {
+      requests: 6,
+      quotaUnits: 36,
+      byResource: {
+        profile: { requests: 1, quotaUnits: 1 },
+        lists: { requests: 2, quotaUnits: 10 },
+        messages: { requests: 1, quotaUnits: 5 },
+        threads: { requests: 2, quotaUnits: 20 },
+      },
+      elapsedMs: 255_000,
+      unitsPerMinute: 12_750,
+      unitsPerMinuteCeiling: 12_750,
+    };
+  }
   async getProfile() {
     return { emailAddress: USER, messagesTotal: 2, threadsTotal: 2, historyId: "history-7" };
   }
-  async listMessageIds() {
+  async listMessageIds(query: string) {
+    this.queries.push(query);
     return ["header-1", "header-2"];
   }
   async fetchMessageHeaders(id: string): Promise<MessageHeader> {
@@ -47,6 +66,7 @@ class FakeGmail implements GmailReader {
   }
   // The participation queries name the sent and starred tiers; anything else is the skim's own listing.
   async listThreadIds(query: string) {
+    this.queries.push(query);
     return query.startsWith("newer_than:") ? ["promoted", "bodyonly"] : ["sent"];
   }
   async fetchThread(id: string): Promise<EmailThread> {
@@ -128,6 +148,67 @@ class SkimGmail implements GmailReader {
   }
 }
 
+class EngagementOrderGmail implements GmailReader {
+  readonly threadReads: string[] = [];
+
+  async getProfile() {
+    return { emailAddress: USER, messagesTotal: 3, threadsTotal: 3, historyId: "history-order" };
+  }
+
+  async listMessageIds() {
+    return ["engaged-reply-header", "engaged-body-header", "quiet-body-header"];
+  }
+
+  async fetchMessageHeaders(id: string): Promise<MessageHeader> {
+    const values = {
+      "engaged-reply-header": {
+        threadId: "participated",
+        timestamp: 1,
+        day: "2026-08-01",
+        fromEmail: "engaged@example.com",
+        labels: ["IMPORTANT", "INBOX"],
+      },
+      "engaged-body-header": {
+        threadId: "engaged-body",
+        timestamp: 2,
+        day: "2026-08-02",
+        fromEmail: "engaged@example.com",
+        labels: ["INBOX"],
+      },
+      "quiet-body-header": {
+        threadId: "quiet-body",
+        timestamp: 3,
+        day: "2026-08-03",
+        fromEmail: "quiet@example.com",
+        labels: ["UNREAD"],
+      },
+    } as const;
+    const row = values[id as keyof typeof values];
+    if (!row) throw new Error(`unknown header ${id}`);
+    return {
+      id,
+      ...row,
+      labels: [...row.labels],
+      fromName: "Sender",
+      subject: id,
+      listId: "",
+      snippet: "Useful update",
+    };
+  }
+
+  async listThreadIds(query: string) {
+    if (query.startsWith("in:sent")) return ["participated"];
+    if (query.startsWith("is:starred")) return [];
+    return ["participated", "engaged-body", "quiet-body"];
+  }
+
+  async fetchThread(id: string): Promise<EmailThread> {
+    this.threadReads.push(id);
+    const sender = id === "quiet-body" ? "quiet@example.com" : "engaged@example.com";
+    return { id, messages: [message(id, "2026-08-01", id === "participated" ? USER : sender)] };
+  }
+}
+
 /** Ignores every sender, tags nothing, and judges no cluster, so only the call sequence is under test. */
 function emptyConceptModel(kinds: string[], onConceptCall: () => void = () => undefined): CallModel {
   return async (request) => {
@@ -182,6 +263,25 @@ test("the complete backfill caches the threads it reads, so the body phase never
       /^backfilled \| 2026-08-26 \| billing@bank\.example \| auto \| 1 msgs \| Statement ready \| Useful update \| body$/mu,
       "and its index row is derived from the thread, in the row format a metadata read would have produced",
     );
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("the body phase starts with threads from an engaged sender", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "roze-generate-engagement-order-"));
+  const root = join(workspace, "brain");
+  try {
+    const client = new EngagementOrderGmail();
+    await runGenerateCommand(["--no-promote", "--no-synthesize"], {
+      root,
+      client,
+      callModel: emptyConceptModel([]),
+      today: "2026-09-02",
+      write: () => undefined,
+      writeError: () => undefined,
+    });
+    assert.deepEqual(client.threadReads, ["participated", "engaged-body", "quiet-body"]);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
@@ -280,6 +380,7 @@ test("generate publishes every target offline and reports only expected cost lan
       { threads: 2, messages: 2, promoted: 1, projects: 0 },
     );
     for (const target of PUBLISH_TARGETS) assert.ok(existsSync(join(root, target)), target);
+    assert.ok(existsSync(join(root, "concepts", "TRACE.md")), "the proposal trace is always published");
     assert.ok(existsSync(join(root, ".cache", USER, "threads")), "caches are scoped by account");
     assert.ok(!existsSync(staleSearchIndex), "a successful publication invalidates the derived search index");
     const meta = JSON.parse(readFileSync(join(root, "meta.json"), "utf8"));
@@ -288,15 +389,67 @@ test("generate publishes every target offline and reports only expected cost lan
       "counts",
       "generatedAt",
       "historyId",
+      "recentMonths",
       "timezone",
       "userEmail",
     ]);
+    assert.equal(meta.recentMonths, 24);
     assert.deepEqual(meta.build, { phase: 4, phases: 4, complete: true, pending: [] });
-    assert.match(readFileSync(join(root, "INDEX.md"), "utf8"), /Build status: complete\./u);
+    const rootIndex = readFileSync(join(root, "INDEX.md"), "utf8");
+    assert.match(rootIndex, /Build status: complete\./u);
+    assert.match(rootIndex, /concepts\/TRACE\.md — every judged concept proposal/u);
+    assert.match(rootIndex, /every other inbox thread of the last two years/u);
     assert.match(diagnostics.join(""), /expected ≈ \$/u);
     assert.doesNotMatch([...output, ...diagnostics].join(""), /hard (cost )?ceiling/iu);
+    assert.match(
+      output.join(""),
+      /API usage: .*\nGmail: 36 units in 6 requests \(threads 2 · messages 1 · lists 2\), 255 s/u,
+    );
   } finally {
     rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("--recent changes only the skim window and publishes its coverage boundary", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "roze-generate-recent-"));
+  const root = join(workspace, "brain");
+  try {
+    const client = new FakeGmail();
+    const metadata = await runGenerateCommand(["--recent", "6", "--no-promote", "--no-synthesize"], {
+      root,
+      client,
+      callModel: emptyConceptModel([]),
+      today: "2026-09-02",
+      write: () => undefined,
+      writeError: () => undefined,
+    });
+    assert.equal(metadata?.recentMonths, 6);
+    assert.equal(JSON.parse(readFileSync(join(root, "meta.json"), "utf8")).recentMonths, 6);
+    assert.ok(client.queries.includes("in:sent -in:chats"));
+    assert.ok(client.queries.includes("is:starred -in:chats"));
+    const skimQueries = client.queries.filter((query) => query.startsWith("newer_than:"));
+    assert.equal(skimQueries.length, 3);
+    assert.ok(skimQueries.every((query) => query.startsWith("newer_than:6m ")));
+    assert.match(readFileSync(join(root, "INDEX.md"), "utf8"), /inbox thread of the last 6 months/u);
+    assert.match(
+      readFileSync(join(root, "evidence", "INDEX.md"), "utf8"),
+      /^# Evidence index \(skim window: last 6 months\)$/mu,
+    );
+    assert.match(
+      readFileSync(join(root, "evidence", "inbox-2026.md"), "utf8"),
+      /^# Skim-tier inbox threads, 2026 \(last 6 months\):/u,
+    );
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("--recent requires a positive integer", async () => {
+  for (const args of [["--recent", "0"], ["--recent=-1"], ["--recent", "1.5"], ["--recent", "Infinity"]]) {
+    await assert.rejects(
+      runGenerateCommand(args, { write: () => undefined, writeError: () => undefined }),
+      /--recent must be a positive integer/u,
+    );
   }
 });
 

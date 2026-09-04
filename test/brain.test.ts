@@ -69,8 +69,14 @@ Approved.
     );
     assert.match(
       readFileSync(join(root, "evidence", "inbox-2026.md"), "utf8"),
+      /^# Skim-tier inbox threads, 2026: not extracted;/u,
+      "the default inbox heading stays byte-compatible",
+    );
+    assert.match(
+      readFileSync(join(root, "evidence", "inbox-2026.md"), "utf8"),
       /^skim9 \| 2026-08-30 \| bob@example\.com \| person \| 1 msgs \| Offer \/ details \| We are pleased to offer \| header$/mu,
     );
+    assert.match(readFileSync(join(root, "evidence", "INDEX.md"), "utf8"), /^# Evidence index\n/u);
     assert.equal(readFileSync(join(root, "evidence", "threads", "thread-1.md"), "utf8"), expected);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -193,7 +199,7 @@ test("a mid-publish failure restores every old target and removes staging state"
     assert.equal(readFileSync(join(root, "INDEX.md"), "utf8"), "old-index");
     assert.ok(!existsSync(join(root, `.staging-${process.pid}`)));
     assert.ok(!existsSync(join(root, `.rollback-${process.pid}`)));
-    assert.deepEqual(PUBLISH_TARGETS.length, 10);
+    assert.deepEqual(PUBLISH_TARGETS.length, 11);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

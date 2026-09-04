@@ -74,7 +74,7 @@ async function rebuildConcepts(options: {
   );
   const concepts = await buildConcepts(extractions, threads, meta.userEmail, context, bodies, loops);
   const root = options.publish ? paths.root : resolve(options.out ?? "concepts-preview");
-  writeConceptFiles(concepts.projects, concepts.interests, concepts.rejections, root, concepts.review);
+  writeConceptFiles(concepts.projects, concepts.interests, concepts.rejections, root, concepts.review, concepts.trace);
   return {
     root,
     counts: concepts.counts,

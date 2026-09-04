@@ -1,6 +1,6 @@
-// The concept layer's entry point and the order of its stages: cards → life-domain tags → entity and
-// per-year domain clusters → enum-cited judge → gates → whole-list review → gates → related threads.
-// This file owns the sequence, the counters in concepts.json, and the cost estimate `--budget` shows.
+// The concept layer's entry point and the order of its stages: cards → life-domain tags → entity,
+// per-year domain, and topic clusters → enum-cited judge → gates → whole-list review → gates →
+// related threads. This file owns the sequence, trace, counters, and cost estimate `--budget` shows.
 import { z } from "zod";
 import type { PipelineContext } from "../context.js";
 import { MODELS, quoteCost, readCachedModelCall, usageLedger } from "../llm/models.js";
@@ -8,6 +8,7 @@ import { cleanText, compareText, textContainsWholeName } from "../shared/text.js
 import { recurringMerchants } from "../memory/recurringMerchants.js";
 import {
   mergeRejections,
+  type ConceptTrace,
   threadIncludesUser,
   type ConceptReviewLog,
   type DomainTags,
@@ -25,6 +26,12 @@ import {
 import { rejectWhatTheModelGetsWrong } from "./applyGates.js";
 import { buildClusters } from "./buildClusters.js";
 import {
+  finishConceptTrace,
+  traceConceptReview,
+  traceJudgeProposals,
+  type ConceptTraceState,
+} from "./conceptTrace.js";
+import {
   buildClusterJudgeBatches,
   buildJudgeRequest,
   formatRowForClusterJudge,
@@ -40,6 +47,7 @@ export interface BuiltConcepts {
   interests: Interest[];
   rejections: RejectionCounts;
   review: ConceptReviewLog;
+  trace: ConceptTrace[];
   counts: Record<string, number>;
 }
 export const EMPTY_CONCEPTS: BuiltConcepts = {
@@ -47,6 +55,7 @@ export const EMPTY_CONCEPTS: BuiltConcepts = {
   interests: [],
   rejections: {},
   review: { merged: [], demoted: [], rejections: {} },
+  trace: [],
   counts: {
     durableProjects: 0,
     recurringInterests: 0,
@@ -57,6 +66,7 @@ export const EMPTY_CONCEPTS: BuiltConcepts = {
     conceptClusters: 0,
     conceptEntityClusters: 0,
     conceptDomainClusters: 0,
+    conceptTopicClusters: 0,
     conceptRecurringMerchants: 0,
     conceptsMergedByReview: 0,
     conceptsDemotedByReview: 0,
@@ -253,6 +263,7 @@ export interface JudgedConcepts {
   rejections: RejectionCounts;
   projects: Project[];
   interests: Interest[];
+  trace: ConceptTraceState;
   /** The ledger's call count when synthesis started, so conceptSynthesisApiCalls stays synthesis-only. */
   callsBefore: number;
 }
@@ -282,7 +293,8 @@ export async function judgeConceptCandidates(
   );
   mergeRejections(rejections, gated.rejections);
   const { projects, interests } = gated;
-  return { cards, tags, clusters, scope, rejections, projects, interests, callsBefore };
+  const trace = traceJudgeProposals(judged, clusters, gated);
+  return { cards, tags, clusters, scope, rejections, projects, interests, trace, callsBefore };
 }
 
 /**
@@ -304,6 +316,7 @@ export async function reviewAndFinishConcepts(
   const rejections: RejectionCounts = { ...judged.rejections };
   const merchants = recurringMerchants([...threads, ...bodies]);
   const reviewed = await reviewConcepts(judged.projects, judged.interests, loops, merchants, userEmail, context);
+  traceConceptReview(judged.trace, reviewed.outcomes);
   mergeRejections(rejections, reviewed.log.rejections);
   // The review could also cite loops and merchant receipts, so the scope widens by exactly those.
   const reviewScope = new Set([...scope, ...reviewed.extraThreadIds]);
@@ -317,6 +330,7 @@ export async function reviewAndFinishConcepts(
     userEmail,
   );
   mergeRejections(rejections, final.rejections);
+  const trace = finishConceptTrace(judged.trace, final);
   attachRelatedThreads(final.projects, final.interests, everyThread, extractions, userEmail);
   return {
     projects: final.projects,
@@ -327,6 +341,7 @@ export async function reviewAndFinishConcepts(
         .sort(),
     ),
     review: reviewed.log,
+    trace,
     counts: {
       durableProjects: final.projects.length,
       recurringInterests: final.interests.length,
@@ -337,6 +352,7 @@ export async function reviewAndFinishConcepts(
       conceptClusters: clusters.length,
       conceptEntityClusters: clusters.filter((cluster) => cluster.kind === "entity").length,
       conceptDomainClusters: clusters.filter((cluster) => cluster.kind === "domain").length,
+      conceptTopicClusters: clusters.filter((cluster) => cluster.kind === "topic").length,
       conceptRecurringMerchants: merchants.length,
       conceptsMergedByReview: reviewed.log.merged.length,
       conceptsDemotedByReview: reviewed.log.demoted.length,
@@ -387,7 +403,7 @@ function judgeCharsForKnownClusters(
     return readCachedModelCall(request) === undefined ? [requestChars(request)] : [];
   });
 }
-/** No tags yet: entity blocks plus three plausible domain placements per useful card. */
+/** No tags yet: entity blocks plus three plausible domain placements and one topic placement per useful card. */
 function projectedJudgeChars(cards: readonly ThreadCard[]): number[] {
   const byId = new Map(cards.map((card) => [card.threadId, card]));
   const entityChars = buildClusters(cards, {}).reduce(
@@ -398,7 +414,7 @@ function projectedJudgeChars(cards: readonly ThreadCard[]): number[] {
   const average = useful.length
     ? useful.reduce((sum, card) => sum + JSON.stringify(formatRowForClusterJudge(card, "")).length, 0) / useful.length
     : 0;
-  const calls = Math.ceil((entityChars + useful.length * 3 * average) / MAX_JUDGE_PAYLOAD_CHARS);
+  const calls = Math.ceil((entityChars + useful.length * 4 * average) / MAX_JUDGE_PAYLOAD_CHARS);
   return Array.from({ length: calls }, () => MAX_JUDGE_PAYLOAD_CHARS);
 }
 // A planning estimate only: actual spend is enforced separately by the usage ledger.

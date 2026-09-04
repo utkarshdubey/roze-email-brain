@@ -329,17 +329,23 @@ test("judge batches are hash-bucketed so a changed cluster leaves the other batc
 });
 
 test("bodies still publish before concepts so receipts can feed the interest review", () => {
-  assert.deepEqual(planPhases({ noPromote: false, noSynthesize: false, noSkim: false, publishOnce: false }), [
-    "full-read",
-    "fast-inbox",
-    "complete-inbox",
-    "body-evidence",
-    "concepts",
-  ]);
-  assert.deepEqual(planPhases({ noPromote: false, noSynthesize: false, noSkim: true, publishOnce: false }), [
-    "full-read",
-    "concepts",
-  ]);
+  assert.deepEqual(
+    planPhases({ noPromote: false, noSynthesize: false, noSkim: false, publishOnce: false, recentMonths: 24 }),
+    [
+      "full-read",
+      "fast-inbox",
+      "complete-inbox",
+      "body-evidence",
+      "concepts",
+    ],
+  );
+  assert.deepEqual(
+    planPhases({ noPromote: false, noSynthesize: false, noSkim: true, publishOnce: false, recentMonths: 24 }),
+    [
+      "full-read",
+      "concepts",
+    ],
+  );
 });
 
 test("a domain with more cards than one request holds is judged per year, so recent efforts survive the cap", () => {
@@ -361,5 +367,29 @@ test("a domain with more cards than one request holds is judged per year, so rec
   assert.deepEqual(
     small.map((cluster) => cluster.anchor),
     ["education & university"],
+  );
+});
+
+test("an entity with more cards than one request holds is judged per year without changing smaller keys", () => {
+  const cards = Array.from({ length: 32 }, (_, index) => ({
+    ...card(
+      `e${String(index).padStart(15, "0")}`,
+      `${index < 2 ? 2021 : 2026}-06-01`,
+      "x",
+    ),
+    mentions: [{ name: "Long-lived partner", kind: "organization" as const, email: "", org: "", role: "" }],
+  }));
+  const clusters = buildClusters(cards, {}).filter((cluster) => cluster.kind === "entity");
+  assert.deepEqual(
+    clusters.map((cluster) => [cluster.key, cluster.anchor, cluster.threadIds.length]),
+    [
+      ["entity-long-lived-partner-2026", "Long-lived partner 2026", 30],
+      ["entity-long-lived-partner-2021", "Long-lived partner 2021", 2],
+    ],
+  );
+  const small = buildClusters(cards.slice(0, 10), {}).filter((cluster) => cluster.kind === "entity");
+  assert.deepEqual(
+    small.map((cluster) => [cluster.key, cluster.anchor]),
+    [["entity-long-lived-partner", "Long-lived partner"]],
   );
 });

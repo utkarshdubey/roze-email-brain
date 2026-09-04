@@ -1,8 +1,8 @@
 // The third concept stage: one model call per batch of clusters turns thread cards into proposed projects
 // and interests. Three things keep it honest — `source_ref` is an enum of the exact `<thread_id>::<day>`
 // pairs in this request, so a citation cannot be invented; a proposal citing outside its own cluster is
-// discarded, so cluster locality survives batching; and batches come from a fixed number of hash buckets,
-// so editing one cluster re-judges one bucket instead of invalidating every later batch's cache.
+// discarded, so cluster locality survives batching; and batches come from fixed hash buckets, with topic
+// clusters isolated from the existing bucket space so adding one never invalidates entity/domain cache keys.
 import { z } from "zod";
 import { mapAtLimitedConcurrency, type PipelineContext } from "../context.js";
 import { MODELS, readCacheOrCall, type CachedModelRequest } from "../llm/models.js";
@@ -168,26 +168,21 @@ export function renderClusterBlock(
 
 /** Fixed, so a changed cluster re-judges its own bucket instead of shifting every later batch. */
 const JUDGE_BUCKETS = 24;
+const TOPIC_JUDGE_BUCKETS = 8;
 /** FNV-1a over the cluster key: stable across runs and machines, unlike anything order-dependent. */
-function bucketOf(key: string): number {
+function bucketOf(key: string, bucketCount: number): number {
   let hash = 2_166_136_261;
   for (const char of key) {
     hash = Math.imul(hash ^ char.charCodeAt(0), 16_777_619) >>> 0;
   }
-  return hash % JUDGE_BUCKETS;
+  return hash % bucketCount;
 }
-/** Each bucket fills its own batches up to the payload cap; batches never mix buckets. */
-export function buildClusterJudgeBatches(
-  clusters: readonly ThreadCluster[],
-  cards: readonly ThreadCard[],
+function fillBucketBatches(
+  buckets: readonly ThreadCluster[][],
+  byId: ReadonlyMap<string, ThreadCard>,
   tags: DomainTags,
 ): ThreadCluster[][] {
-  const byId = new Map(cards.map((card) => [card.threadId, card]));
-  const buckets: ThreadCluster[][] = Array.from({ length: JUDGE_BUCKETS }, () => []);
   const batches: ThreadCluster[][] = [];
-  for (const cluster of clusters) {
-    buckets[bucketOf(cluster.key)]!.push(cluster);
-  }
   for (const bucket of buckets) {
     let batch: ThreadCluster[] = [];
     let payloadChars = PREAMBLE.length;
@@ -209,6 +204,27 @@ export function buildClusterJudgeBatches(
     }
   }
   return batches;
+}
+/** Entity/domain batches retain their 24-bucket cache inputs; topic batches use eight buckets appended after them. */
+export function buildClusterJudgeBatches(
+  clusters: readonly ThreadCluster[],
+  cards: readonly ThreadCard[],
+  tags: DomainTags,
+): ThreadCluster[][] {
+  const byId = new Map(cards.map((card) => [card.threadId, card]));
+  const existingBuckets: ThreadCluster[][] = Array.from({ length: JUDGE_BUCKETS }, () => []);
+  const topicBuckets: ThreadCluster[][] = Array.from({ length: TOPIC_JUDGE_BUCKETS }, () => []);
+  for (const cluster of clusters) {
+    if (cluster.kind === "topic") {
+      topicBuckets[bucketOf(`topic:${cluster.key}`, TOPIC_JUDGE_BUCKETS)]!.push(cluster);
+    } else {
+      existingBuckets[bucketOf(cluster.key, JUDGE_BUCKETS)]!.push(cluster);
+    }
+  }
+  return [
+    ...fillBucketBatches(existingBuckets, byId, tags),
+    ...fillBucketBatches(topicBuckets, byId, tags),
+  ];
 }
 /** Every `<thread_id>::<day>` this batch may cite, sorted so the schema enum is byte-stable. */
 function citableSourceRefs(
@@ -273,27 +289,72 @@ export function collectClusterJudgments(
   references: Readonly<Record<string, Citation>>,
 ): ClusterJudgment {
   const threadIdsByCluster = new Map(batch.map((cluster) => [cluster.key, new Set(cluster.threadIds)]));
-  const result: ClusterJudgment = { projects: [], interests: [], rejections: {} };
+  const result: ClusterJudgment = {
+    projects: [],
+    interests: [],
+    rejections: {},
+    proposals: { projects: [], interests: [] },
+  };
   for (const cluster of document.clusters) {
     const allowed = threadIdsByCluster.get(cluster.cluster);
     if (!allowed) {
       reject(result.rejections, "cluster_unknown");
+      result.proposals.projects.push(
+        ...cluster.projects.map((project) => ({
+          name: project.name,
+          cluster: cluster.cluster,
+          citations: project.evidence.map((row) => references[row.source_ref]!),
+          rejectedBy: "cluster_unknown",
+        })),
+      );
+      result.proposals.interests.push(
+        ...cluster.interests.map((interest) => ({
+          name: interest.topic,
+          cluster: cluster.cluster,
+          citations: interest.evidence.map((row) => references[row.source_ref]!),
+          rejectedBy: "cluster_unknown",
+        })),
+      );
       continue;
     }
     for (const { evidence, ...project } of cluster.projects) {
       const rows = expandCitations(evidence, allowed, references);
       if (rows) {
+        result.proposals.projects.push({
+          name: project.name,
+          cluster: cluster.cluster,
+          citations: rows,
+          gateInputIndex: result.projects.length,
+        });
         result.projects.push({ ...project, evidence: rows, cluster: cluster.cluster });
       } else {
         reject(result.rejections, "project_outside_cluster");
+        result.proposals.projects.push({
+          name: project.name,
+          cluster: cluster.cluster,
+          citations: evidence.map((row) => references[row.source_ref]!),
+          rejectedBy: "project_outside_cluster",
+        });
       }
     }
     for (const { evidence, current_state: currentState, ...interest } of cluster.interests) {
       const rows = expandCitations(evidence, allowed, references);
       if (rows) {
+        result.proposals.interests.push({
+          name: interest.topic,
+          cluster: cluster.cluster,
+          citations: rows,
+          gateInputIndex: result.interests.length,
+        });
         result.interests.push({ ...interest, currentState, evidence: rows, cluster: cluster.cluster });
       } else {
         reject(result.rejections, "interest_outside_cluster");
+        result.proposals.interests.push({
+          name: interest.topic,
+          cluster: cluster.cluster,
+          citations: evidence.map((row) => references[row.source_ref]!),
+          rejectedBy: "interest_outside_cluster",
+        });
       }
     }
   }
@@ -323,10 +384,33 @@ export async function judgeClusters(
     },
     (done) => context.log("judging", done, batches.length),
   );
-  const result: ClusterJudgment = { projects: [], interests: [], rejections: {} };
+  const result: ClusterJudgment = {
+    projects: [],
+    interests: [],
+    rejections: {},
+    proposals: { projects: [], interests: [] },
+  };
   for (const row of rows) {
+    const projectOffset = result.projects.length;
+    const interestOffset = result.interests.length;
     result.projects.push(...row.projects);
     result.interests.push(...row.interests);
+    result.proposals.projects.push(
+      ...row.proposals.projects.map((proposal) => ({
+        ...proposal,
+        ...(proposal.gateInputIndex === undefined
+          ? {}
+          : { gateInputIndex: proposal.gateInputIndex + projectOffset }),
+      })),
+    );
+    result.proposals.interests.push(
+      ...row.proposals.interests.map((proposal) => ({
+        ...proposal,
+        ...(proposal.gateInputIndex === undefined
+          ? {}
+          : { gateInputIndex: proposal.gateInputIndex + interestOffset }),
+      })),
+    );
     mergeRejections(result.rejections, row.rejections);
   }
   return result;

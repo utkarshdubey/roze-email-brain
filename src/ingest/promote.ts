@@ -1,5 +1,5 @@
-// The one model stage inside ingestion: a batch of sender lines goes to the mini model, which answers all
-// / recent / latest / ignore, and local limits turn those answers into thread ids for the next fetch.
+// The one model stage inside ingestion: header samples and the user's own engagement become sender lines,
+// the mini model answers all / recent / latest / ignore, and local limits turn those answers into thread ids.
 
 import { z } from "zod";
 import type { BrainPaths } from "../brain/storage.js";
@@ -7,11 +7,28 @@ import { mapAtLimitedConcurrency, type PipelineContext } from "../context.js";
 import { MODELS, quoteCost } from "../llm/models.js";
 import { readJson, writeDataAtomically } from "../shared/atomicFiles.js";
 import { looksLikeAHuman, type MessageHeader } from "../types.js";
+import { senderAddressKey, type SenderEngagement } from "./engagement.js";
 
 export const promotionReadSchema = z.enum(["all", "recent", "latest", "ignore"]);
 export type PromotionRead = z.infer<typeof promotionReadSchema>;
 type PromotionDecisions = Record<string, PromotionRead>;
 const decisionsSchema = z.record(z.string().min(1), promotionReadSchema);
+export const PROMOTION_SENDER_LINE_FORMAT_VERSION = 2;
+const ORIGINAL_SENDER_LINE_FORMAT_VERSION = 1;
+const decisionCacheSchema = z
+  .object({
+    senderLineFormatVersion: z.number().int().nonnegative(),
+    decisions: decisionsSchema,
+  })
+  .strict();
+
+interface PromotionDecisionCache {
+  senderLineFormatVersion: number;
+  decisions: PromotionDecisions;
+  warning?: string;
+}
+
+const reportedCacheWarnings = new WeakMap<PipelineContext, Set<string>>();
 
 const BATCH_SIZE = 120;
 const PROMOTION_WORKERS = 4;
@@ -20,13 +37,65 @@ const ALL_THREADS = 25;
 const RECENT_THREADS = 5;
 const RECENT_WINDOW_SECONDS = 180 * 86_400;
 
-export function readPromotionDecisions(paths: BrainPaths, warn: (message: string) => void): PromotionDecisions {
+function senderLineFormatWarning(paths: BrainPaths, found: string): string {
+  return (
+    `  warning: promotion cache sender-line format ${found}; expected version ` +
+    `${PROMOTION_SENDER_LINE_FORMAT_VERSION}. Move ${paths.cachedPromotionFile} aside to re-evaluate cached senders.`
+  );
+}
+
+function readPromotionDecisionCache(paths: BrainPaths): PromotionDecisionCache {
   const value = readJson(paths.cachedPromotionFile);
-  if (value === undefined) return {};
-  const parsed = decisionsSchema.safeParse(value);
-  if (parsed.success) return parsed.data;
-  warn("  warning: ignoring malformed promotion cache");
-  return {};
+  if (value === undefined) {
+    return { senderLineFormatVersion: PROMOTION_SENDER_LINE_FORMAT_VERSION, decisions: {} };
+  }
+  const current = decisionCacheSchema.safeParse(value);
+  if (current.success) {
+    const { decisions, senderLineFormatVersion } = current.data;
+    if (senderLineFormatVersion === PROMOTION_SENDER_LINE_FORMAT_VERSION || !Object.keys(decisions).length) {
+      return { senderLineFormatVersion: PROMOTION_SENDER_LINE_FORMAT_VERSION, decisions };
+    }
+    return {
+      senderLineFormatVersion,
+      decisions,
+      warning: senderLineFormatWarning(paths, `is version ${senderLineFormatVersion}`),
+    };
+  }
+  const legacy = decisionsSchema.safeParse(value);
+  if (legacy.success) {
+    if (!Object.keys(legacy.data).length) {
+      return { senderLineFormatVersion: PROMOTION_SENDER_LINE_FORMAT_VERSION, decisions: legacy.data };
+    }
+    return {
+      senderLineFormatVersion: ORIGINAL_SENDER_LINE_FORMAT_VERSION,
+      decisions: legacy.data,
+      warning: senderLineFormatWarning(paths, "is unversioned (original version 1)"),
+    };
+  }
+  return {
+    senderLineFormatVersion: PROMOTION_SENDER_LINE_FORMAT_VERSION,
+    decisions: {},
+    warning: "  warning: ignoring malformed promotion cache",
+  };
+}
+
+function readPromotionCacheForContext(context: PipelineContext): PromotionDecisionCache {
+  const cache = readPromotionDecisionCache(context.paths);
+  if (!cache.warning) return cache;
+  const reported = reportedCacheWarnings.get(context) ?? new Set<string>();
+  const warningKey = context.paths.cachedPromotionFile;
+  if (!reported.has(warningKey)) {
+    context.log(cache.warning);
+    reported.add(warningKey);
+    reportedCacheWarnings.set(context, reported);
+  }
+  return cache;
+}
+
+export function readPromotionDecisions(paths: BrainPaths, warn: (message: string) => void): PromotionDecisions {
+  const cache = readPromotionDecisionCache(paths);
+  if (cache.warning) warn(cache.warning);
+  return cache.decisions;
 }
 
 /** Codes and login alerts carry no memory, but are dropped per message so a bank keeps its real notices. */
@@ -46,7 +115,8 @@ const PROMOTE_SYSTEM = `You decide which inbox senders are worth reading in full
 user's people, projects, interests, and open loops. You only see the sender, how many threads they sent, and a
 few subjects with the opening words of each message. Every subject stays searchable and any single message can
 be fetched on demand later, so ignoring a sender loses nothing except automatic extraction. When in doubt,
-ignore. For each sender answer:
+ignore. Each sender line also shows how many threads the user opened, replied to, marked important, or starred;
+these counts reflect the user's own behaviour. For each sender answer:
 - all: a real person writing to the user, or a small number of messages with personal stakes (recruiters
   about a specific role, landlords, school/immigration offices, colleagues, friends, one-off admin such as
   refunds, leases, appointments, invoices to pay, application decisions).
@@ -66,6 +136,13 @@ interface PromotionWork {
   payload: string;
 }
 
+export type PromotionEngagement = Pick<
+  SenderEngagement,
+  "threads" | "opened" | "replied" | "important" | "starred"
+>;
+export type PromotionEngagementBySender = ReadonlyMap<string, PromotionEngagement>;
+const NO_ENGAGEMENT: PromotionEngagementBySender = new Map();
+
 export function renderSubjectWithPreview(row: MessageHeader): string {
   const preview = (row.snippet ?? "").replace(/\s+/gu, " ").trim().slice(0, 90);
   return preview ? `${row.subject.slice(0, 60)} — ${preview}` : row.subject.slice(0, 60);
@@ -76,7 +153,11 @@ export function groupFirstHeadersBySender(rows: readonly MessageHeader[]): Map<s
   const first = new Map<string, MessageHeader>();
   for (const row of rows) {
     const prior = first.get(row.threadId);
-    if (!prior || row.timestamp < prior.timestamp) {
+    if (
+      !prior ||
+      row.timestamp < prior.timestamp ||
+      (row.timestamp === prior.timestamp && row.id.localeCompare(prior.id) < 0)
+    ) {
       first.set(row.threadId, row);
     }
   }
@@ -94,19 +175,39 @@ export function groupFirstHeadersBySender(rows: readonly MessageHeader[]): Map<s
 }
 
 const newestFirst = (rows: readonly MessageHeader[]): MessageHeader[] =>
-  [...rows].sort((a, b) => b.timestamp - a.timestamp);
+  [...rows].sort(
+    (a, b) => b.timestamp - a.timestamp || a.threadId.localeCompare(b.threadId) || a.id.localeCompare(b.id),
+  );
 
-function renderSenderLine(sender: string, messages: readonly MessageHeader[]): string {
+function engagementFromHeaders(messages: readonly MessageHeader[]): PromotionEngagement {
+  return {
+    threads: messages.length,
+    opened: messages.filter((row) => !row.labels.includes("UNREAD")).length,
+    replied: 0,
+    important: messages.filter((row) => row.labels.includes("IMPORTANT")).length,
+    starred: messages.filter((row) => row.labels.includes("STARRED")).length,
+  };
+}
+
+function renderSenderLine(
+  sender: string,
+  messages: readonly MessageHeader[],
+  engagementBySender: PromotionEngagementBySender,
+): string {
   const rows = newestFirst(messages);
+  const engagement = engagementBySender.get(senderAddressKey(sender)) ?? engagementFromHeaders(rows);
   return (
     `${sender} | ${rows.length} threads | latest ${rows[0]?.day ?? ""} | ` +
-    rows.slice(0, 3).map(renderSubjectWithPreview).join(" || ")
+    `${rows.slice(0, 3).map(renderSubjectWithPreview).join(" || ")} | ` +
+    `opened ${engagement.opened}/${engagement.threads} | replied ${engagement.replied}/${engagement.threads} | ` +
+    `important ${engagement.important} | starred ${engagement.starred}`
   );
 }
 
 function planPromotion(
   rows: readonly MessageHeader[],
   decisions: PromotionDecisions,
+  engagementBySender: PromotionEngagementBySender,
 ): { grouped: Map<string, MessageHeader[]>; work: PromotionWork[]; senders: number } {
   const grouped = groupFirstHeadersBySender(rows);
   const todo = [...grouped]
@@ -116,15 +217,21 @@ function planPromotion(
   const work: PromotionWork[] = [];
   for (let start = 0; start < todo.length; start += BATCH_SIZE) {
     const senders = todo.slice(start, start + BATCH_SIZE);
-    const payload = senders.map((sender) => renderSenderLine(sender, grouped.get(sender)!)).join("\n");
+    const payload = senders
+      .map((sender) => renderSenderLine(sender, grouped.get(sender)!, engagementBySender))
+      .join("\n");
     work.push({ senders, payload });
   }
   return { grouped, work, senders: todo.length };
 }
 
-export function estimatePromotionCost(rows: readonly MessageHeader[], context: PipelineContext) {
-  const decisions = readPromotionDecisions(context.paths, (message) => context.log(message));
-  const { work, senders } = planPromotion(rows, decisions);
+export function estimatePromotionCost(
+  rows: readonly MessageHeader[],
+  context: PipelineContext,
+  engagementBySender: PromotionEngagementBySender = NO_ENGAGEMENT,
+) {
+  const cache = readPromotionCacheForContext(context);
+  const { work, senders } = planPromotion(rows, cache.decisions, engagementBySender);
   const inputTokens = Math.trunc(
     work.reduce((sum, batch) => sum + (PROMOTE_SYSTEM.length + batch.payload.length) / 4, 0),
   );
@@ -172,9 +279,11 @@ function choosePromotedThreads(grouped: ReadonlyMap<string, MessageHeader[]>, de
 export async function decideWhatToReadPerSender(
   rows: readonly MessageHeader[],
   context: PipelineContext,
+  engagementBySender: PromotionEngagementBySender = NO_ENGAGEMENT,
 ): Promise<string[]> {
-  const decisions = readPromotionDecisions(context.paths, (message) => context.log(message));
-  const { grouped, work, senders: total } = planPromotion(rows, decisions);
+  const cache = readPromotionCacheForContext(context);
+  const { decisions } = cache;
+  const { grouped, work, senders: total } = planPromotion(rows, decisions, engagementBySender);
   let done = 0;
   await mapAtLimitedConcurrency(work, PROMOTION_WORKERS, async (batch) => {
     const response = await context.callModel({
@@ -191,7 +300,13 @@ export async function decideWhatToReadPerSender(
     for (const sender of batch.senders) {
       decisions[sender] = returned.get(sender) ?? "ignore";
     }
-    writeDataAtomically(context.paths.cachedPromotionFile, decisionsSchema.parse(decisions));
+    writeDataAtomically(
+      context.paths.cachedPromotionFile,
+      decisionCacheSchema.parse({
+        senderLineFormatVersion: cache.senderLineFormatVersion,
+        decisions,
+      }),
+    );
     context.log("promoting", (done += batch.senders.length), total);
   });
   return choosePromotedThreads(grouped, decisions);

@@ -10,6 +10,13 @@ const DUPLICATE_THREAD_OVERLAP = 0.6;
 const citedThreads = (row: Project | Interest): Set<string> => new Set(row.evidence.map((item) => item.threadId));
 const isPassive = (row: Project | Interest): boolean => "engagement" in row && row.engagement === "passive";
 const isNotDirect = (row: Project | Interest): boolean => "engagement" in row && row.engagement !== "direct";
+export type DedupeOutcome<T> =
+  | { row: T; outcome: "passed" }
+  | { row: T; outcome: "collapsed"; counter: string; into: T };
+export interface DedupeResult<T> {
+  kept: T[];
+  outcomes: DedupeOutcome<T>[];
+}
 function jaccardOverlap(left: ReadonlySet<string>, right: ReadonlySet<string>): number {
   const common = [...left].filter((value) => right.has(value)).length;
   return common / (left.size + right.size - common);
@@ -19,7 +26,7 @@ export function dropNearDuplicates<T extends Project | Interest>(
   rows: readonly T[],
   counts: RejectionCounts,
   kind: "project" | "interest",
-): T[] {
+): DedupeResult<T> {
   const ranked = [...rows].sort(
     (a, b) =>
       Number(isPassive(a)) - Number(isPassive(b)) ||
@@ -27,16 +34,20 @@ export function dropNearDuplicates<T extends Project | Interest>(
       citedThreads(b).size - citedThreads(a).size,
   );
   const kept: T[] = [];
+  const outcomes: DedupeOutcome<T>[] = [];
   for (const row of ranked) {
     const threads = citedThreads(row);
-    const duplicate = kept.some((other) => jaccardOverlap(threads, citedThreads(other)) >= DUPLICATE_THREAD_OVERLAP);
+    const duplicate = kept.find((other) => jaccardOverlap(threads, citedThreads(other)) >= DUPLICATE_THREAD_OVERLAP);
     if (duplicate) {
-      reject(counts, `${kind}_near_duplicate`);
+      const counter = `${kind}_near_duplicate`;
+      reject(counts, counter);
+      outcomes.push({ row, outcome: "collapsed", counter, into: duplicate });
     } else {
       kept.push(row);
+      outcomes.push({ row, outcome: "passed" });
     }
   }
-  return kept;
+  return { kept, outcomes };
 }
 /** One name's words wholly inside another's: "coding tools" and "AI coding tools" are not two interests. */
 export function dropSubsumed<T extends Project | Interest>(
@@ -44,25 +55,29 @@ export function dropSubsumed<T extends Project | Interest>(
   counts: RejectionCounts,
   kind: "project" | "interest",
   nameOf: (row: T) => string,
-): T[] {
+): DedupeResult<T> {
   const words = (row: T): Set<string> => new Set(wordsFromText(nameOf(row)));
   const ranked = [...rows].sort(
     (a, b) => Number(isNotDirect(a)) - Number(isNotDirect(b)) || b.evidence.length - a.evidence.length,
   );
   const kept: T[] = [];
+  const outcomes: DedupeOutcome<T>[] = [];
   for (const row of ranked) {
     const mine = words(row);
-    const subset = kept.some((other) => {
+    const subset = kept.find((other) => {
       const theirs = words(other);
       return (
         mine.size > 0 && ([...mine].every((word) => theirs.has(word)) || [...theirs].every((word) => mine.has(word)))
       );
     });
     if (subset) {
-      reject(counts, kind === "project" ? "project_subsumed_name" : "interest_subsumed_topic");
+      const counter = kind === "project" ? "project_subsumed_name" : "interest_subsumed_topic";
+      reject(counts, counter);
+      outcomes.push({ row, outcome: "collapsed", counter, into: subset });
     } else {
       kept.push(row);
+      outcomes.push({ row, outcome: "passed" });
     }
   }
-  return kept;
+  return { kept, outcomes };
 }
