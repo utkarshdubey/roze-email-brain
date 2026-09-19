@@ -40,6 +40,7 @@ and [[NOTES]] (decisions and tradeoffs); this vault holds the *why* behind them 
 - [[One status board owns the terminal]]
 - [[Read each inbox thread once]]
 - [[Ranked retrieval is a derived cache]]
+- [[Threads rank first, lines are the snippet]]
 - [[Deferred features]]
 - [[The reviewer path goes through a proxy]]
 

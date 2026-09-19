@@ -1,67 +1,31 @@
 // Runs the same bounded search_memory calls against a cited golden set and measures whether expected
 // threads surface, without calling a model or the network. Literal and FTS runs are explicit so an FTS
 // failure cannot be reported as an indexed result after silently falling back to the scanner.
-import { readFileSync } from "node:fs";
+process.env.ROZE_SKIP_ENV = "1";
+
 import { resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { parseArgs } from "node:util";
-import { z } from "zod";
 
 import { resolveBrainPaths, type SearchScope } from "../src/brain/storage.js";
 import { searchMemory } from "../src/query/memorySearch.js";
 import type { Match } from "../src/query/toolContracts.js";
+import {
+  cutRetrievalQuestion,
+  loadRetrievalItems,
+  threadIdsInResultLine,
+  threadIdsInTrailingFragment,
+  type RetrievalItem,
+} from "./retrievalGold.js";
 import { runAsScript, writeOut } from "./script.js";
 
-const ENGINES = ["literal", "fts"] as const;
+const ENGINES = ["literal", "fts", "lines"] as const;
 type Engine = (typeof ENGINES)[number];
 
 const BENCH_SCOPES = ["all", "thread_summaries"] as const satisfies readonly SearchScope[];
 type BenchScope = (typeof BENCH_SCOPES)[number];
 const BENCH_MATCHES = ["all_terms", "any_term"] as const satisfies readonly Match[];
 type BenchMatch = (typeof BENCH_MATCHES)[number];
-
-const expectedCitationsSchema = z
-  .object({
-    cite_any_of: z.array(z.string().min(1)).optional(),
-  })
-  .loose()
-  .default({});
-
-const exampleItemSchema = z
-  .object({
-    id: z.string().min(1),
-    question: z.string().min(1),
-    expect: expectedCitationsSchema,
-  })
-  .loose();
-
-const goldenSchema = z
-  .object({
-    items: z.array(
-      z
-        .object({
-          id: z.string().min(1),
-          question: z.string().min(1),
-          expect: expectedCitationsSchema,
-          evidence: z.array(z.object({ thread_id: z.string().min(1) }).loose()).default([]),
-          expected_negative: z
-            .object({
-              boundary_evidence_thread_ids: z.array(z.string().min(1)).default([]),
-            })
-            .loose()
-            .nullable()
-            .optional(),
-        })
-        .loose(),
-    ),
-  })
-  .loose();
-
-interface RetrievalItem {
-  id: string;
-  question: string;
-  expectedThreadIds: string[];
-}
 
 interface ParsedRank {
   rank: number | null;
@@ -93,60 +57,10 @@ interface Metrics {
 }
 
 const RESULT_LINE = /^([^:]+):(\d+): (.*)$/u;
-const RAW_THREAD_PATH = /^evidence\/threads\/([0-9a-f]{8,})\.md$/iu;
-const YEAR_ROW = /^([0-9a-f]{8,}) \|/iu;
-const CITATION = /\[t:([0-9a-f]{8,})(?=\s|\])/giu;
 const OMITTED_MIDDLE = /^…\[middle omitted; \d+ chars total\]…$/u;
 
-function uniqueThreadIds(ids: readonly string[]): string[] {
-  return [...new Set(ids.map((id) => id.trim()).filter(Boolean))];
-}
-
-function loadItems(file: string): RetrievalItem[] {
-  const raw: unknown = JSON.parse(readFileSync(file, "utf8"));
-  if (Array.isArray(raw)) {
-    return z
-      .array(exampleItemSchema)
-      .parse(raw)
-      .flatMap((item) => {
-        const expectedThreadIds = uniqueThreadIds(item.expect.cite_any_of ?? []);
-        return expectedThreadIds.length ? [{ id: item.id, question: item.question, expectedThreadIds }] : [];
-      });
-  }
-
-  return goldenSchema.parse(raw).items.flatMap((item) => {
-    const expectedThreadIds = uniqueThreadIds([
-      ...(item.expect.cite_any_of ?? []),
-      ...item.evidence.map((row) => row.thread_id),
-      ...(item.expected_negative?.boundary_evidence_thread_ids ?? []),
-    ]);
-    return expectedThreadIds.length ? [{ id: item.id, question: item.question, expectedThreadIds }] : [];
-  });
-}
-
-function idsInResultLine(line: string): string[] {
-  const result = RESULT_LINE.exec(line);
-  if (!result) return [];
-  const ids: string[] = [];
-  const pathId = RAW_THREAD_PATH.exec(result[1]!)?.[1];
-  const rowId = YEAR_ROW.exec(result[3]!)?.[1];
-  if (pathId) ids.push(pathId);
-  if (rowId) ids.push(rowId);
-  for (const match of result[3]!.matchAll(CITATION)) ids.push(match[1]!);
-  return uniqueThreadIds(ids);
-}
-
-/** A capped result can retain the suffix of one row without its path prefix. */
-function idsInTrailingFragment(line: string): string[] {
-  const ids: string[] = [];
-  const rowId = YEAR_ROW.exec(line)?.[1];
-  if (rowId) ids.push(rowId);
-  for (const match of line.matchAll(CITATION)) ids.push(match[1]!);
-  return uniqueThreadIds(ids);
-}
-
 function matchingExpectedId(line: string, expected: ReadonlySet<string>, fragment = false): string | undefined {
-  const ids = fragment ? idsInTrailingFragment(line) : idsInResultLine(line);
+  const ids = fragment ? threadIdsInTrailingFragment(line) : threadIdsInResultLine(line);
   return ids.find((id) => expected.has(id.toLowerCase()));
 }
 
@@ -197,7 +111,7 @@ function parseRank(output: string, expectedThreadIds: readonly string[]): Parsed
 /** Keeps the evolving searchMemory override at one bench-only seam. */
 function runSearch(brain: string, item: RetrievalItem, scope: BenchScope, match: BenchMatch, engine: Engine): string {
   const options =
-    engine === "fts"
+    engine !== "literal"
       ? {
           engine,
           onIndexFallback: (message: string): never => {
@@ -206,7 +120,7 @@ function runSearch(brain: string, item: RetrievalItem, scope: BenchScope, match:
         }
       : { engine };
   // The tool contract caps a query at 200 characters, so a long question is cut at the last word inside it.
-  const query = item.question.length <= 200 ? item.question : item.question.slice(0, 200).replace(/\s+\S*$/u, "");
+  const query = cutRetrievalQuestion(item.question);
   return searchMemory(brain, query, scope, match, 20, "none", "ignore", "", "", options);
 }
 
@@ -282,8 +196,8 @@ function renderTable(
 }
 
 function parseEngine(value: string | undefined): Engine {
-  if (value === "literal" || value === "fts") return value;
-  throw new Error("--engine must be literal or fts");
+  if (value === "literal" || value === "fts" || value === "lines") return value;
+  throw new Error("--engine must be literal, fts, or lines");
 }
 
 async function main(): Promise<void> {
@@ -299,18 +213,18 @@ async function main(): Promise<void> {
   if (positionals.length !== 1) {
     throw new Error(
       "Usage: tsx bench/retrievalRecall.ts <questions.json|golden.json> " +
-        "--engine literal|fts [--brain path] [--out results.json]",
+        "--engine literal|fts|lines [--brain path] [--out results.json]",
     );
   }
 
   const engine = parseEngine(values.engine);
   const source = resolve(positionals[0]!);
   const brain = resolveBrainPaths(values.brain).root;
-  const items = loadItems(source);
+  const items = loadRetrievalItems(source);
   if (!items.length) throw new Error("question set has no items with expected citation thread ids");
 
   let preparationMilliseconds = 0;
-  if (engine === "fts") {
+  if (engine !== "literal") {
     const started = performance.now();
     runSearch(brain, items[0]!, BENCH_SCOPES[0], BENCH_MATCHES[0], engine);
     preparationMilliseconds = round(performance.now() - started);

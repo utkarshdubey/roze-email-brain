@@ -15,9 +15,10 @@ import {
 import { ensureDirectory, readJson } from "../shared/atomicFiles.js";
 import { cleanText } from "../shared/text.js";
 import { listFiles } from "./memoryPaths.js";
+import { directThreadId, threadIdsInSearchHit } from "./threadIds.js";
 import { linesOf, type Match } from "./toolContracts.js";
 
-export type SearchEngine = "literal" | "fts";
+export type SearchEngine = "literal" | "fts" | "lines";
 export type SearchIndexKind = "view" | "inbox" | "full" | "summary" | "transaction" | "evidence";
 
 export interface IndexedSearchHit {
@@ -55,6 +56,7 @@ export interface SqliteModule {
 export interface SearchIndexOptions {
   /** `null` is an explicit test seam for runtimes where `node:sqlite` is unavailable. */
   sqlite?: SqliteModule | null;
+  threadStage?: boolean;
 }
 
 export class SearchIndexUnavailableError extends Error {
@@ -89,7 +91,7 @@ interface StoredSearchRow {
 }
 
 const INDEX_FILE = "search.sqlite";
-const INDEX_SCHEMA_VERSION = "1";
+const INDEX_SCHEMA_VERSION = "2";
 const DAY_IN_LINE = /\b20\d\d-\d\d-\d\d\b/gu;
 const WORD = /[\p{L}\p{M}\p{N}_@.+-]+/gu;
 const requireFromHere = createRequire(import.meta.url);
@@ -194,6 +196,7 @@ function currentIndexMatches(sqlite: SqliteModule, indexPath: string, fingerprin
     const storedVersion = statement.get("schema_version")?.value;
     database.prepare("SELECT rowid FROM search_rows LIMIT 1").get();
     database.prepare("SELECT rowid FROM search_fts LIMIT 1").get();
+    database.prepare("SELECT rowid FROM thread_fts LIMIT 1").get();
     return storedFingerprint === fingerprint && storedVersion === INDEX_SCHEMA_VERSION;
   } catch {
     return false;
@@ -234,9 +237,19 @@ function createSchema(database: SqliteDatabase): void {
       kind TEXT NOT NULL,
       day TEXT NOT NULL,
       person INTEGER NOT NULL,
-      text TEXT NOT NULL
+      text TEXT NOT NULL,
+      thread_id TEXT
     );
     CREATE INDEX search_rows_path ON search_rows(path);
+    CREATE INDEX search_rows_thread_id ON search_rows(thread_id);
+    CREATE TABLE thread_documents (
+      rowid INTEGER PRIMARY KEY,
+      id TEXT NOT NULL UNIQUE,
+      inbox_term INTEGER NOT NULL
+    );
+    CREATE VIRTUAL TABLE thread_fts USING fts5(
+      subject, header, summary, body, content = '', tokenize = 'porter unicode61'
+    );
     CREATE VIRTUAL TABLE search_fts USING fts5(text, tokenize = 'porter unicode61');
   `);
 }
@@ -248,9 +261,21 @@ function populateIndex(
 ): void {
   const insertMetadata = database.prepare("INSERT INTO search_index_metadata(key, value) VALUES (?, ?)");
   const insertRow = database.prepare(
-    "INSERT INTO search_rows(rowid, path, line, kind, day, person, text) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    "INSERT INTO search_rows(rowid, path, line, kind, day, person, text, thread_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
   );
   const insertFts = database.prepare("INSERT INTO search_fts(rowid, text) VALUES (?, ?)");
+  const documents = new Map<string, {
+    subject: string;
+    header: string[];
+    summary: string[];
+    body: string[];
+    inbox: string[];
+    person: boolean;
+  }>();
+  const insertDocument = database.prepare("INSERT INTO thread_documents(rowid, id, inbox_term) VALUES (?, ?, ?)");
+  const insertThreadFts = database.prepare(
+    "INSERT INTO thread_fts(rowid, subject, header, summary, body) VALUES (?, ?, ?, ?, ?)",
+  );
   let rowid = 0;
   database.exec("BEGIN IMMEDIATE");
   try {
@@ -259,9 +284,48 @@ function populateIndex(
       for (const [index, text] of linesOf(readFileSync(file.resolved, "utf8")).entries()) {
         rowid += 1;
         const person = kind === "inbox" && text.toLowerCase().includes("| person |");
-        insertRow.run(rowid, file.path, index + 1, kind, newestDay(text), Number(person), text);
+        const id = directThreadId(file.path, text);
+        insertRow.run(rowid, file.path, index + 1, kind, newestDay(text), Number(person), text, id);
+        if (id) {
+          // SQLite returns stored text up to the first NUL; thread documents use that same text.
+          const storedText = text.split("\0", 1)[0]!;
+          const document = documents.get(id) ?? {
+            subject: "", header: [], summary: [], body: [], inbox: [], person: false,
+          };
+          documents.set(id, document);
+          if (kind === "evidence") {
+            document.body.push(storedText);
+            if (!document.subject && storedText.startsWith("# ")) document.subject = storedText.slice(2);
+          } else if (kind === "summary") {
+            document.summary.push(storedText);
+          } else if (["full", "inbox", "transaction"].includes(kind)) {
+            document.header.push(storedText);
+          }
+          if (!document.subject) {
+            const columns = storedText.split("|").map((part) => part.trim());
+            document.subject = kind === "inbox" ? columns[5] ?? "" : kind === "full" ? columns[4] ?? "" : "";
+          }
+          if (kind === "inbox") {
+            document.inbox.push(storedText);
+            document.person ||= person;
+          }
+        }
         insertFts.run(rowid, text);
       }
+    }
+    let threadRowid = 0;
+    for (const [id, document] of documents) {
+      threadRowid += 1;
+      const inboxTerm = document.inbox.length ? (document.person ? 15 : -5) : 0;
+      const body = document.body.length ? document.body : document.inbox.slice(0, 1);
+      insertDocument.run(threadRowid, id, inboxTerm);
+      insertThreadFts.run(
+        threadRowid,
+        document.subject,
+        document.header.join("\n"),
+        document.summary.join("\n"),
+        body.join("\n"),
+      );
     }
     insertMetadata.run("schema_version", INDEX_SCHEMA_VERSION);
     insertMetadata.run("fingerprint", fingerprint);
@@ -453,6 +517,17 @@ interface RankedHits {
   total: number;
 }
 
+const FTS_LINE_SCORE = `10 - bm25(search_fts, 1.0) * 10
+             + CASE WHEN phrase_matches.rowid IS NULL THEN 0 ELSE 40 END
+             + CASE WHEN search_rows.kind = 'inbox'
+                    THEN CASE WHEN search_rows.person = 1 THEN 15 ELSE -5 END
+                    ELSE 0 END
+             + CASE WHEN search_rows.day = '' THEN 0 ELSE
+                 ((CAST(substr(search_rows.day, 1, 4) AS REAL) - 2000)
+                  + (CAST(substr(search_rows.day, 6, 2) AS REAL) - 1) / 12
+                  + (CAST(substr(search_rows.day, 9, 2) AS REAL) - 1) / 372) * 1.5
+               END`;
+
 /** SQLite ranks and applies each file's share before crossing the JS boundary; only the requested rows do. */
 function readRankedFtsHits(
   database: SqliteDatabase,
@@ -464,16 +539,7 @@ function readRankedFtsHits(
   const sql = `
     WITH scored AS (
       SELECT search_rows.rowid, search_rows.path, search_rows.line,
-             10 - bm25(search_fts, 1.0) * 10
-             + CASE WHEN phrase_matches.rowid IS NULL THEN 0 ELSE 40 END
-             + CASE WHEN search_rows.kind = 'inbox'
-                    THEN CASE WHEN search_rows.person = 1 THEN 15 ELSE -5 END
-                    ELSE 0 END
-             + CASE WHEN search_rows.day = '' THEN 0 ELSE
-                 ((CAST(substr(search_rows.day, 1, 4) AS REAL) - 2000)
-                  + (CAST(substr(search_rows.day, 6, 2) AS REAL) - 1) / 12
-                  + (CAST(substr(search_rows.day, 9, 2) AS REAL) - 1) / 372) * 1.5
-               END AS score
+             ${FTS_LINE_SCORE} AS score
       FROM search_fts
       JOIN search_rows ON search_rows.rowid = search_fts.rowid
       LEFT JOIN phrase_matches ON phrase_matches.rowid = search_rows.rowid
@@ -513,6 +579,77 @@ function readRankedFtsHits(
   };
 }
 
+/** Score matching lines for all selected threads together, without a query per thread. */
+function readThreadStageHits(database: SqliteDatabase, expression: string, limit: number): IndexedSearchHit[] {
+  const threads = database.prepare(`
+    SELECT thread_documents.id,
+           10 - 10 * bm25(thread_fts, 1.0, 1.0, 1.0, 1.0) + thread_documents.inbox_term AS score
+    FROM thread_fts
+    JOIN thread_documents ON thread_documents.rowid = thread_fts.rowid
+    WHERE thread_fts MATCH ?
+    ORDER BY score DESC, thread_documents.id
+    LIMIT ?
+  `).all(expression, Math.ceil((2 * limit) / 3));
+  if (!threads.length) return [];
+  const ids = threads.map((row) => stringValue(row, "id"));
+  const placeholders = ids.map(() => "?").join(", ");
+  const rows = database.prepare(`
+    WITH scored AS MATERIALIZED (
+      SELECT search_rows.thread_id, search_rows.path, search_rows.line, search_rows.text,
+             ${FTS_LINE_SCORE} AS score
+      FROM search_fts
+      JOIN search_rows ON search_rows.rowid = search_fts.rowid
+      LEFT JOIN phrase_matches ON phrase_matches.rowid = search_rows.rowid
+      WHERE search_fts MATCH ? AND search_rows.thread_id IN (${placeholders})
+    ), ranked AS (
+      SELECT *, row_number() OVER (PARTITION BY thread_id ORDER BY score DESC, path, line) AS thread_rank
+      FROM scored
+    )
+    SELECT * FROM ranked WHERE thread_rank = 1
+  `).all(expression, ...ids);
+  const best = new Map(rows.map((row) => [stringValue(row, "thread_id"), row]));
+  const missing = ids.filter((id) => !best.has(id));
+  if (missing.length) {
+    const fallback = database.prepare(`
+      WITH ranked AS (
+        SELECT thread_id, path, line, text,
+               row_number() OVER (
+                 PARTITION BY thread_id ORDER BY CASE WHEN kind = 'summary' THEN 0 ELSE 1 END, rowid
+               ) AS thread_rank
+        FROM search_rows WHERE thread_id IN (${missing.map(() => "?").join(", ")})
+      )
+      SELECT * FROM ranked WHERE thread_rank = 1
+    `).all(...missing);
+    for (const row of fallback) best.set(stringValue(row, "thread_id"), row);
+  }
+  return threads.flatMap((thread) => {
+    const row = best.get(stringValue(thread, "id"));
+    return row ? [{
+      score: numberValue(thread, "score"),
+      path: stringValue(row, "path"),
+      line: numberValue(row, "line"),
+      text: cleanText(stringValue(row, "text"), 500) || "(blank line)",
+    }] : [];
+  });
+}
+
+function mergeThreadHits(
+  threads: readonly IndexedSearchHit[],
+  lines: readonly IndexedSearchHit[],
+  limit: number,
+): IndexedSearchHit[] {
+  const hits = [...threads];
+  const shown = new Set(threads.map((hit) => directThreadId(hit.path, hit.text)));
+  for (const hit of lines) {
+    if (hits.length >= limit) break;
+    const ids = threadIdsInSearchHit(hit.path, hit.text).map((id) => id.toLowerCase());
+    if (ids.some((id) => shown.has(id))) continue;
+    hits.push(hit);
+    for (const id of ids) shown.add(id);
+  }
+  return hits;
+}
+
 function pathMatches(path: string, terms: readonly string[], match: Match): boolean {
   const lower = path.toLowerCase();
   return match === "all_terms"
@@ -546,6 +683,7 @@ function queryIndex(
   match: Match,
   limit: number,
   scopedFiles: readonly IndexedFile[],
+  threadStage: boolean,
 ): RankedHits {
   const terms = termsFromQuery(query);
   let database: SqliteDatabase | undefined;
@@ -578,7 +716,20 @@ function queryIndex(
         right.score - left.score || left.path.localeCompare(right.path) || left.line - right.line,
       )
       .slice(0, limit);
-    return { hits, total: ranked.total + filenameHits.length };
+    const total = ranked.total + filenameHits.length;
+    if (!threadStage || !terms.length || match !== "any_term" || scope !== "all") return { hits, total };
+    const threadHits = readThreadStageHits(database, matchExpression(terms, match), limit);
+    let merged = mergeThreadHits(threadHits, hits, limit);
+    let requested = limit;
+    while (merged.length < limit && requested < total) {
+      requested = Math.min(total, Math.max(requested * 2, requested + limit));
+      const remainder = readRankedFtsHits(database, matchExpression(terms, match), scope, requested);
+      const lines = [...remainder.hits, ...filenameHits].sort((left, right) =>
+        right.score - left.score || left.path.localeCompare(right.path) || left.line - right.line,
+      ).slice(0, requested);
+      merged = mergeThreadHits(threadHits, lines, limit);
+    }
+    return { hits: merged, total };
   } finally {
     closeQuietly(database);
   }
@@ -598,7 +749,9 @@ export function searchIndexedMemory(
     const { files, indexPath } = currentIndex(sqlite, paths);
     const scopedFiles = scope === "all" ? files : filesForScope(files, scope);
     const normalizedQuery = query.trim().replace(/\s+/gu, " ");
-    const ranked = queryIndex(sqlite, indexPath, normalizedQuery, scope, match, limit, scopedFiles);
+    const ranked = queryIndex(
+      sqlite, indexPath, normalizedQuery, scope, match, limit, scopedFiles, options.threadStage !== false,
+    );
     return { ...ranked, filesSearched: scopedFiles.length };
   } catch (error) {
     if (error instanceof SearchIndexUnavailableError) throw error;

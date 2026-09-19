@@ -300,8 +300,8 @@ let reportedIndexFallback = false;
 
 function selectedSearchEngine(options: SearchMemoryOptions): SearchEngine {
   const selected = options.engine ?? process.env.ROZE_SEARCH ?? DEFAULT_SEARCH_ENGINE;
-  if (selected === "literal" || selected === "fts") return selected;
-  throw new Error("ROZE_SEARCH must be either literal or fts");
+  if (selected === "literal" || selected === "fts" || selected === "lines") return selected;
+  throw new Error("ROZE_SEARCH must be literal, fts, or lines");
 }
 
 function reportIndexFallbackOnce(error: unknown, report: SearchMemoryOptions["onIndexFallback"]): void {
@@ -342,6 +342,7 @@ export function searchMemory(
   try {
     const result = searchIndexedMemory(brainDir, input.query, input.scope, input.match, input.limit, {
       sqlite: options.sqlite,
+      threadStage: selectedSearchEngine(options) === "lines" ? false : options.threadStage,
     });
     if (!result.hits.length)
       return `No literal matches for ${quoted} in ${scope} (${result.filesSearched} files searched).`;
