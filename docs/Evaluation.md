@@ -49,7 +49,14 @@ literal scanner and the FTS index, `any_term`:
 | v4 sealed, 32 | thread_summaries | 31.3% / 0.142 / 383 | 87.5% / 0.638 / 239 |
 
 `all_terms` with a whole question matches nothing on either engine, as expected. FTS is the default;
-`ROZE_SEARCH=literal` restores the scanner.
+`ROZE_SEARCH=lines` restores the line ranking measured above; `ROZE_SEARCH=literal` restores the scanner.
+
+**Threads rank first (no model, $0).** All-scope `any_term` searches now rank threads and show each thread's
+best line. On a second public Enron mailbox (380 EnronQA questions, design and ship line fixed beforehand on
+the first), the expected thread was visible within 10 results for 72.6% of three-keyword queries against
+59.5% (+13.2 points [9.2, 17.4]) and for 90.3% of full questions against 76.3% (54 won / 1 lost).
+Reproduce with `bench/threadStage.ts`. End-to-end answers were not re-scored.
+See [[Threads rank first, lines are the snippet]].
 
 **Concept layer (trace, per-year entity split, topic clusters).** Rebuild on the reference brain $1.30:
 29 → 30 projects, 107 → 92 interests, 390 traced proposals, 19 accepted concepts came from topic clusters.

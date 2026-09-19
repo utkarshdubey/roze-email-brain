@@ -20,5 +20,9 @@ extends by 8 while calls keep opening new material, up to 48 calls / $1. Tools s
 the cached prompt prefix is stable. See [[Typed tools, never a shell]] and [[Counting is tool work]].
 
 The index is `.cache/<account>/search.sqlite`, never a published view. The first search builds it from the
-allowlisted Markdown when missing or stale; publication deletes it. `ROZE_SEARCH=literal` selects the
-reference scanner, and a runtime without `node:sqlite` falls back once with a verbose diagnostic.
+allowlisted Markdown when missing or stale; publication deletes it. All-scope `any_term` searches with a
+word term rank threads first in `ceil(2L/3)` slots, show each thread's best line, and fill the rest from the
+existing line and filename order with thread deduplication. Other scopes and `all_terms` keep line ranking.
+`ROZE_SEARCH=lines` restores the previous ranking; `ROZE_SEARCH=literal` selects the reference scanner,
+and a runtime without `node:sqlite` falls back once with a verbose diagnostic.
+See [[Threads rank first, lines are the snippet]].

@@ -139,13 +139,18 @@ Absolute paths, traversal, symlinks, dotfiles, caches, JSONL, and non-generated 
 rejected. `read_email` is reserved for indexed header-only mail; its handler caches the thread and
 records it for extraction on the next generate.
 
-Ranked searches use one FTS5 row per allowlisted Markdown line with the `porter unicode61` tokenizer.
+Ranked searches index allowlisted Markdown lines and thread documents with the `porter unicode61` tokenizer.
+All-scope `any_term` queries with a word term reserve `ceil(2L/3)` slots for equally weighted thread BM25
+plus the inbox-person term, showing each thread's best line; the rest use the line and filename ranking,
+deduplicated by thread. Thread stage order is preserved. Other calls retain the line ranking.
 The stored file/day/kind/person metadata combines BM25 with the existing phrase, inbox-person, and
 recency bonuses before the existing per-file share and result limit. User fragments are always bound
 as quoted MATCH parameters, and scope predicates come only from `VIEW_GLOBS_BY_SCOPE`. The database
 lives at `.cache/<account>/search.sqlite`; a fingerprint of `meta.json`'s generation day and the
 published file paths, sizes, and mtimes triggers an atomic rebuild. Node versions without `node:sqlite`
 and failed builds fall back to the literal scanner; `ROZE_SEARCH=literal` selects it explicitly.
+`ROZE_SEARCH=lines` (or `engine: "lines"` / `threadStage: false`) restores the previous line ranking through
+the same schema-v2 derived cache. `src/query/threadIds.ts` owns thread identity for indexing and benchmarks.
 
 Grouped search counts each matching thread once across yearly indexes and can group by subject,
 sender, merchant, kind, currency, day, month, or year; transaction totals can also be summed. This is
